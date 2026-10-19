@@ -1,0 +1,11 @@
+base_config: ../config_arwm_50.yaml
+model:
+  region_attention:
+    mode: adaptive
+    enabled: true
+training:
+  num_runs: 1
+paths:
+  checkpoint_dir: checkpoints/arwm_variants/adaptive
+  log_dir: logs/arwm_variants/adaptive
+  results_dir: results/arwm/variants/adaptive
