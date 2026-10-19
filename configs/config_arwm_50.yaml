@@ -1,0 +1,165 @@
+dataset:
+  name: FER2013
+  root: data/FER2013
+  image_size: 160
+  num_classes: 7
+  class_names:
+  - anger
+  - disgust
+  - fear
+  - happiness
+  - sadness
+  - surprise
+  - neutral
+  negative_emotion_indices:
+  - 0
+  - 1
+  - 2
+  - 4
+  split_ratios:
+  - 0.7
+  - 0.15
+  - 0.15
+  subject_independent: true
+  sequence_length: 16
+  frame_stride: 1
+augmentation:
+  train:
+    horizontal_flip: true
+    random_crop: true
+    color_jitter:
+      brightness: 0.3
+      contrast: 0.3
+      saturation: 0.2
+      hue: 0.1
+    rotation_degrees: 15
+    gaussian_blur: true
+    blur_kernel_size: 5
+  val:
+    horizontal_flip: false
+    random_crop: false
+  test:
+    horizontal_flip: false
+    random_crop: false
+model:
+  swin:
+    variant: swin_base_patch4_window7_224
+    input_size: 160
+    pretrained: true
+    pretrained_source: imagenet
+    window_size: 7
+    embed_dim: 128
+    depths:
+    - 2
+    - 2
+    - 18
+    - 2
+    num_heads:
+    - 4
+    - 8
+    - 16
+    - 32
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.2
+  region_attention:
+    enabled: true
+    hidden_dim: 128
+    fusion_weight: 0.3
+    fallback_to_global: true
+    checkpoint_dir: checkpoints/fer2013_arwm
+  fane:
+    enabled: true
+    hidden_dim: 256
+    use_mask_guidance: true
+    residual_weight: 1.0
+  classifier:
+    embedding_dim: 1024
+    dropout: 0.3
+    num_classes: 7
+  bilstm:
+    input_dim: 1024
+    hidden_dim: 512
+    num_layers: 2
+    dropout: 0.3
+    bidirectional: true
+  residual_refinement:
+    enabled: true
+    kernel_size: 3
+    padding: 1
+  stress_head:
+    hidden_dim: 256
+    output_dim: 1
+stress:
+  alpha: 0.7
+  beta: 0.3
+  alpha_range:
+  - 0.5
+  - 0.6
+  - 0.7
+  - 0.8
+  high_stress_threshold: 0.5
+training:
+  optimizer: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  betas:
+  - 0.9
+  - 0.999
+  scheduler: StepLR
+  step_size: 15
+  gamma: 0.5
+  cosine_t_max: 50
+  batch_size: 32
+  num_epochs: 50
+  num_workers: 0
+  pin_memory: false
+  freeze_backbone_epochs: 3
+  early_stopping_patience: 46
+  resume_best_val_acc: 64.00371574547144
+  gradient_clip_norm: 1.0
+  loss: CrossEntropyLoss
+  class_weighted_loss: true
+  label_smoothing: 0.1
+  seed: 42
+  num_runs: 3
+evaluation:
+  compute_confusion_matrix: true
+  compute_roc_auc: true
+  compute_balanced_accuracy: true
+  compute_etsi: true
+  compute_tve: true
+  compute_scs: true
+  compute_tce: true
+  compute_scsi: true
+  robustness:
+    occlusion_levels:
+    - 0.1
+    - 0.2
+    - 0.3
+    - 0.4
+    blur_sigmas:
+    - 1.0
+    - 2.0
+    - 3.0
+    brightness_factors:
+    - 0.3
+    - 0.5
+    - 0.7
+    frame_drop_rates:
+    - 0.1
+    - 0.2
+    - 0.3
+    - 0.4
+paths:
+  checkpoint_dir: checkpoints/fer2013_arwm
+  arwm_checkpoint_dir: checkpoints/fer2013_arwm
+  arwm_log_dir: logs/fer2013_arwm
+  results_dir: results
+  log_dir: logs
+  best_model: checkpoints/fer2013_weighted_freeze3_lr1e4/best_model.pth
+logging:
+  use_tensorboard: true
+  use_wandb: false
+  wandb_project: swin-fane-stress
+  log_interval: 10

@@ -1,0 +1,11 @@
+base_config: ../config_arwm_50.yaml
+model:
+  region_attention:
+    mode: fixed
+    enabled: true
+training:
+  num_runs: 1
+paths:
+  checkpoint_dir: checkpoints/arwm_variants/fixed
+  log_dir: logs/arwm_variants/fixed
+  results_dir: results/arwm/variants/fixed

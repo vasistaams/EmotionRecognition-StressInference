@@ -1,0 +1,11 @@
+base_config: ../config_arwm_50.yaml
+model:
+  region_attention:
+    mode: "off"
+    enabled: false
+training:
+  num_runs: 1
+paths:
+  checkpoint_dir: checkpoints/arwm_variants/off
+  log_dir: logs/arwm_variants/off
+  results_dir: results/arwm/variants/off
