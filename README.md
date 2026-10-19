@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Swin-FANE + BiLSTM-ResNet: Emotion Recognition & Temporal Stress Estimation
 
 > **Paper:** "A Two-Phase Swin–FANE and BiLSTM–ResNet Framework for Emotion Recognition and Temporal Stress Estimation"
@@ -246,3 +247,6 @@ exported report records each checkpoint hash and path.
 ## License
 
 MIT License
+=======
+# EmotionRecognition-StressInference
+>>>>>>> origin/main
