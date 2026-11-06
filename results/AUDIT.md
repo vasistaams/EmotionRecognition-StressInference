@@ -97,3 +97,55 @@ The correct value is therefore `0.16171352800538208`, which rounds to `0.1617`.
 ## Summary
 
 The repository implements and stores the relevant evidence: the Swin-FANE + ARWM spatial encoder, a BiLSTM temporal module plus residual refinement, a FER2013 data loader with the intended train/validation split, and a context-aware benchmark that records the exact checkpoint and timing scope. The audited numbers that matter are consistent with the saved JSON/CSV artifacts.
+
+## J. Follow-up
+
+### J.1 Step 1: Requirement matrix for variant evidence
+
+- Wrote the matrix to `results/final/REQUIREMENTS_MATRIX.md`.
+- Key evidence included:
+  - `results/arwm/off_20/run_summary.json`: `best_checkpoint_validation_metrics.accuracy = 71.22619600557361`, `best_validation_accuracy = 71.22619600557361`.
+  - `results/arwm/fixed_20/run_summary.json`: `best_validation_accuracy = 71.66744078030655`.
+  - `results/arwm/evaluation_20261023_190929/metrics.json`: carries the controlled comparison summary for off/fixed/adaptive with `trainable_parameters` values `101192640`, `102244288`, and `102638019` respectively.
+  - `results/arwm_comparison_2026/context_aware/test_evaluation/evaluation_metrics.json`: `accuracy = 0.7117581499024798`, `balanced_accuracy = 0.7021085857776342`, `macro_f1 = 0.6998816976502785`, `roc_auc_ovr_macro = 0.8701311996537983`.
+- Data quality constraint: the legacy `adaptive_*` smoke and legacy evaluation files are not a clean controlled ablation; they are explicitly marked as incomplete/legacy in their own JSON metadata.
+
+### J.2 Step 2: Search for the requested values across results/
+
+- The same value search will be written to `results/final/VALUE_SEARCH_TABLE.md` in the next step.
+- The value set requested by the user (`69.98`, `70.87`, `68.80`, `69.38`, `70.99`, `68.51`, `69.50`, `68.46`, `101.19`, `102.24`, `102.64`, `11.14`, `11.72`, `11.70`) is not a single uniform metric stream; it matches the previously saved legacy evaluation outputs and latency-related numbers in different files rather than one single benchmark table.
+
+### J.3 Step 3: Context-aware ARWM exact behavior
+
+- `models/context_aware_arwm.py` defines a global-context-conditioned weighting module; `global_context` defaults to `features.mean(dim=1)` if not supplied.
+- The coded equation is:
+  - `local = einsum('brc,rhc->brh', region_features, local_weight)`
+  - `context = einsum('bc,rhc->brh', global_context, context_weight)`
+  - `hidden = tanh(local + context + attention_bias)`
+  - `scores = einsum('brh,rh->br', hidden, score_vector)`
+  - `weights = softmax(scores, dim=-1)`
+- The output has `projected = region_proj(combined)` where `combined = sum(weights * region_features)`, so the projection does exist.
+- Parameter counts are mode-specific: legacy adaptive ARWM uses `region_mlp` (`3 * feature_dim -> hidden_dim -> 3`) plus `region_proj`; the context-aware module uses `local_weight`, `context_weight`, `attention_bias`, and `score_vector` with `feature_dim=1024, hidden_dim=128`, plus the same `region_proj` output projection.
+
+### J.4 Step 4: validation_ratio, seed dependence, and MD5 overlap
+
+- The actual validation split ratio implemented in `data/fer2013_dataset.py` is `validation_ratio = 0.15` and the split is done per class with `rng = np.random.default_rng(seed)`.
+- The validation subset therefore depends on the seed because it is a seeded, class-wise permutation before slicing the validation count.
+- Seeds used in the saved experiments are overwhelmingly `42` (see `configs/config_arwm_50.yaml`, `configs/arwm/comparison_2026_context_aware.yaml`, and the saved run metadata).
+- MD5 overlap check on the actual FER2013 files (same logic as the code) gives non-zero hash overlaps between the official test set and train/validation images: `train_overlap = 440`, `validation_overlap = 126`, while the saved path-level inventory reported zero path collisions. This means the risk is bytewise data duplication, not path duplication.
+
+### J.5 Step 5: BiLSTM status and video stress provenance
+
+- `models/bilstm_resnet.py` and `models/full_framework.py` contain a trainable BiLSTM/residual temporal path, but the saved results under `results/testvideo1/temporal_analysis.json` explicitly say `"learned_stress_prediction": false`.
+- The `results/testvideo1/temporal_analysis.json` method block shows stress is computed as a proxy from frame-level probabilities: `probability_volatility = 0.5 * L1(P_t - P_(t-1))`, `negative_affect_volatility = abs(r_t - r_(t-1))`, and `stress_proxy = alpha * negative_affect + beta * negative_affect_volatility` with `alpha = 0.7` and `beta = 0.3`.
+- Therefore `emotion_transitions`, `volatility`, and `NADI`/stress proxy values in the saved video result are derived from frame-level emotion probabilities, not from a trained BiLSTM output.
+
+### J.6 Step 6: local labeled video emotion/stress datasets
+
+- No local labeled video emotion/stress dataset beyond the FER2013 image dataset and sample demo videos was found in the repository tree.
+- The only local video assets under `data/videos/` are `testvideo1.mp4` and `testvideo2.mp4`, and they are not paired with ground-truth emotion/stress labels.
+
+### J.7 Step 7: latency reconciliation
+
+- This step will run the same-checkpoint reconciliation benchmark under `results/final/latency_reconciliation/` and record the synchronized `forward` vs `forward_frame` results for batch size 1 and 8, using 50 warm-up iterations and 500 timed iterations.
+- The output will preserve the saved benchmark metadata and the exact reproduction command results without changing any training artifacts.
