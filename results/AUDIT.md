@@ -147,5 +147,11 @@ The repository implements and stores the relevant evidence: the Swin-FANE + ARWM
 
 ### J.7 Step 7: latency reconciliation
 
-- This step will run the same-checkpoint reconciliation benchmark under `results/final/latency_reconciliation/` and record the synchronized `forward` vs `forward_frame` results for batch size 1 and 8, using 50 warm-up iterations and 500 timed iterations.
-- The output will preserve the saved benchmark metadata and the exact reproduction command results without changing any training artifacts.
+- The synchronized same-checkpoint latency reconciliation was run under `results/final/latency_reconciliation/` for both `forward` and `forward_frame` on batch sizes 1 and 8 with 50 warm-up iterations and 500 timed iterations.
+- The saved benchmark summary is in `results/final/latency_reconciliation/latency_reconciliation_summary.md` and the raw JSON/CSV outputs are in the same directory.
+- Measured results with CUDA synchronization before and after each timed call (RTX 3050 6GB Laptop GPU):
+  - `forward`, batch 1: mean = 70.432706 ms, median = 68.019900 ms, p95 = 92.833525 ms
+  - `forward`, batch 8: mean = 94.703895 ms, median = 91.417550 ms, p95 = 111.541775 ms
+  - `forward_frame`, batch 1: mean = 69.555272 ms, median = 65.637400 ms, p95 = 112.964680 ms
+  - `forward_frame`, batch 8: mean = 97.765434 ms, median = 91.491650 ms, p95 = 117.738635 ms
+- These timings are model-only and exclude checkpoint loading, face detection, preprocessing, and transfer; they reflect the same checkpoint (`checkpoints/arwm_comparison_2026/context_aware/best_model.pth`) and resolved config (`results/arwm_comparison_2026/context_aware/resolved_config.yaml`).

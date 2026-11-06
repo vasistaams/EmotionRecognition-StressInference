@@ -1,0 +1,58 @@
+{
+  "checkpoint": "C:\\Users\\vedag\\OneDrive\\Desktop\\EmotionRecognition-StressInference\\checkpoints\\arwm_comparison_2026\\context_aware\\best_model.pth",
+  "config": "C:\\Users\\vedag\\OneDrive\\Desktop\\EmotionRecognition-StressInference\\results\\arwm_comparison_2026\\context_aware\\resolved_config.yaml",
+  "device": "cuda",
+  "device_name": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+  "warmup_iterations": 50,
+  "timed_iterations": 500,
+  "method_batch_summary": [
+    {
+      "method": "forward",
+      "batch_size": 1,
+      "stats_ms": {
+        "mean": 70.43270559888333,
+        "median": 68.01990000531077,
+        "p95": 92.83352499478497,
+        "min": 26.338999974541366,
+        "max": 120.95839995890856,
+        "std": 13.092125435686407
+      }
+    },
+    {
+      "method": "forward",
+      "batch_size": 8,
+      "stats_ms": {
+        "mean": 94.70389520004392,
+        "median": 91.41754999291152,
+        "p95": 111.5417749271728,
+        "min": 84.3558000633493,
+        "max": 255.78470004256815,
+        "std": 14.198286311849214
+      }
+    },
+    {
+      "method": "forward_frame",
+      "batch_size": 1,
+      "stats_ms": {
+        "mean": 69.55527219502255,
+        "median": 65.63739996636286,
+        "p95": 112.96467995853163,
+        "min": 26.700499933212996,
+        "max": 153.48450001329184,
+        "std": 17.40874836227767
+      }
+    },
+    {
+      "method": "forward_frame",
+      "batch_size": 8,
+      "stats_ms": {
+        "mean": 97.76543380063958,
+        "median": 91.49165003327653,
+        "p95": 117.73863496491674,
+        "min": 85.64830000977963,
+        "max": 339.19610001612455,
+        "std": 18.880001578700202
+      }
+    }
+  ]
+}
