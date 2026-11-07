@@ -1,0 +1,161 @@
+{
+  "root": "data/FER2013",
+  "seed": 42,
+  "validation_ratio": 0.15,
+  "hash_definition": "SHA-256 of decoded grayscale pixel array shape followed by pixel bytes",
+  "label_order": [
+    "anger",
+    "disgust",
+    "fear",
+    "happiness",
+    "sadness",
+    "surprise",
+    "neutral"
+  ],
+  "original_dataset": {
+    "training_folder_before_holdout": {
+      "image_count": 28709,
+      "unique_hash_count": 27473,
+      "duplicate_hash_groups": 1035,
+      "extra_duplicate_images": 1236,
+      "conflicting_label_groups": 39
+    },
+    "train": {
+      "image_count": 24403,
+      "unique_hash_count": 23484,
+      "duplicate_hash_groups": 780,
+      "extra_duplicate_images": 919,
+      "conflicting_label_groups": 34
+    },
+    "validation": {
+      "image_count": 4306,
+      "unique_hash_count": 4267,
+      "duplicate_hash_groups": 36,
+      "extra_duplicate_images": 39,
+      "conflicting_label_groups": 1
+    },
+    "test_combined": {
+      "image_count": 7178,
+      "unique_hash_count": 7092,
+      "duplicate_hash_groups": 81,
+      "extra_duplicate_images": 86,
+      "conflicting_label_groups": 4
+    },
+    "train_validation": {
+      "shared_hash_groups": 278,
+      "left_images_in_shared_groups": 356,
+      "right_images_in_shared_groups": 290,
+      "conflicting_label_hash_groups": 8
+    },
+    "train_test": {
+      "shared_hash_groups": 440,
+      "left_images_in_shared_groups": 568,
+      "right_images_in_shared_groups": 474,
+      "conflicting_label_hash_groups": 21
+    },
+    "validation_test": {
+      "shared_hash_groups": 126,
+      "left_images_in_shared_groups": 135,
+      "right_images_in_shared_groups": 137,
+      "conflicting_label_hash_groups": 5
+    },
+    "private_test": {
+      "image_count": 3589,
+      "unique_hash_count": 3572,
+      "duplicate_hash_groups": 16,
+      "extra_duplicate_images": 17,
+      "conflicting_label_groups": 2
+    },
+    "public_test": {
+      "image_count": 3589,
+      "unique_hash_count": 3563,
+      "duplicate_hash_groups": 26,
+      "extra_duplicate_images": 26,
+      "conflicting_label_groups": 1
+    },
+    "train_class_counts": {
+      "anger": 3396,
+      "disgust": 371,
+      "fear": 3482,
+      "happiness": 6133,
+      "sadness": 4106,
+      "surprise": 2695,
+      "neutral": 4220
+    },
+    "validation_class_counts": {
+      "anger": 599,
+      "disgust": 65,
+      "fear": 615,
+      "happiness": 1082,
+      "sadness": 724,
+      "surprise": 476,
+      "neutral": 745
+    }
+  },
+  "cleaned_split": {
+    "removed_train_images_matching_test_hashes": 703,
+    "removed_train_images_internally_conflicting_label_groups": 73,
+    "removed_train_duplicate_copies_after_test_filter": 1021,
+    "unique_clean_training_pool_images": 26912,
+    "train": {
+      "image_count": 22876,
+      "unique_hash_count": 22876,
+      "duplicate_hash_groups": 0,
+      "extra_duplicate_images": 0,
+      "conflicting_label_groups": 0
+    },
+    "validation": {
+      "image_count": 4036,
+      "unique_hash_count": 4036,
+      "duplicate_hash_groups": 0,
+      "extra_duplicate_images": 0,
+      "conflicting_label_groups": 0
+    },
+    "train_validation": {
+      "shared_hash_groups": 0,
+      "left_images_in_shared_groups": 0,
+      "right_images_in_shared_groups": 0,
+      "conflicting_label_hash_groups": 0
+    },
+    "train_test_combined": {
+      "shared_hash_groups": 0,
+      "left_images_in_shared_groups": 0,
+      "right_images_in_shared_groups": 0,
+      "conflicting_label_hash_groups": 0
+    },
+    "validation_test_combined": {
+      "shared_hash_groups": 0,
+      "left_images_in_shared_groups": 0,
+      "right_images_in_shared_groups": 0,
+      "conflicting_label_hash_groups": 0
+    },
+    "train_class_counts": {
+      "anger": 3210,
+      "disgust": 298,
+      "fear": 3227,
+      "happiness": 5976,
+      "sadness": 3975,
+      "surprise": 2091,
+      "neutral": 4099
+    },
+    "validation_class_counts": {
+      "anger": 566,
+      "disgust": 52,
+      "fear": 570,
+      "happiness": 1054,
+      "sadness": 702,
+      "surprise": 369,
+      "neutral": 723
+    },
+    "test_combined_count": 7178,
+    "test_private_count": 3589,
+    "test_public_count": 3589
+  },
+  "files": {
+    "train": "train.csv",
+    "validation": "validation.csv",
+    "test_combined": "test_combined.csv",
+    "test_private": "test_private.csv",
+    "test_public": "test_public.csv"
+  }
+}

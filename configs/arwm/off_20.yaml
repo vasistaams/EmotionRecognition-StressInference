@@ -1,0 +1,15 @@
+base_config: ../config_arwm_50.yaml
+model:
+  region_attention:
+    mode: "off"
+    enabled: false
+training:
+  num_runs: 1
+  num_epochs: 20
+paths:
+  checkpoint_dir: checkpoints/arwm_variants/off_20
+  log_dir: logs/arwm_variants/off_20
+  results_dir: results/arwm/off_20
+  arwm_checkpoint_dir: checkpoints/arwm_variants/off_20
+  arwm_log_dir: logs/arwm_variants/off_20
+  best_model: checkpoints/arwm_variants/off_20/best_model.pth

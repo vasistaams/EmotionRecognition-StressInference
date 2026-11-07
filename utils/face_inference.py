@@ -120,7 +120,7 @@ def preprocess_face(
 
 def region_weight_log_record(mode: str, weights=None) -> Dict:
     """Build mode-aware region-weight fields without inventing off-mode values."""
-    if mode not in {"off", "fixed", "adaptive"}:
+    if mode not in {"off", "fixed", "adaptive", "context_aware"}:
         raise ValueError(f"Unknown region-attention mode: {mode}")
     if mode == "off":
         if weights is not None:

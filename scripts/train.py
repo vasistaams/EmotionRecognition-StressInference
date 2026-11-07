@@ -23,6 +23,8 @@ Paper reference: Section 5.1 (experimental setup), Section 4.4 (optimisation)
 import os
 import sys
 import argparse
+import json
+import platform
 import random
 import shutil
 import time
@@ -34,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np
 import torch
 import torch.nn as nn
+import yaml
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 
@@ -91,6 +94,8 @@ def train_epoch(
     epoch: int,
     log_interval: int = 10,
     logger: TrainingLogger = None,
+    amp_enabled: bool = False,
+    scaler=None,
 ) -> dict:
     """
     Runs one training epoch over the dataset.
@@ -123,15 +128,22 @@ def train_epoch(
 
         # ---- Forward pass (frame mode: images shape B,C,H,W) ----
         optimizer.zero_grad()
-        output = model.forward_frame(images, mask=masks)
-
-        # ---- Cross-entropy loss (paper Equation 14) ----
-        loss = criterion(output['logits'], labels)
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+            output = model.forward_frame(images, mask=masks)
+            loss = criterion(output['logits'].float(), labels)
 
         # ---- Backward + gradient clip ----
-        loss.backward()
+        if scaler is not None and scaler.is_enabled():
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+        else:
+            loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        if scaler is not None and scaler.is_enabled():
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
 
         # ---- Accumulate metrics ----
         with torch.no_grad():
@@ -161,6 +173,7 @@ def validate_epoch(
     device: torch.device,
     metrics: EmotionMetrics,
     region_metrics: RegionWeightMetrics = None,
+    amp_enabled: bool = False,
 ) -> dict:
     """
     Evaluates the model on the validation set.
@@ -184,8 +197,9 @@ def validate_epoch(
         images = batch['image'].to(device, non_blocking=True)
         labels = batch['label'].to(device, non_blocking=True)
 
-        output = model.forward_frame(images)
-        loss   = criterion(output['logits'], labels)
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+            output = model.forward_frame(images)
+            loss = criterion(output['logits'].float(), labels)
 
         metrics.update(output['probs'], labels, loss=loss.item())
         if region_metrics is not None:
@@ -256,10 +270,11 @@ def train(config: dict, args):
     """
     if args.arwm_mode:
         set_region_attention_mode(config, args.arwm_mode)
-        config.setdefault('paths', {})['checkpoint_dir'] = (
-            f"checkpoints/arwm_variants/{args.arwm_mode}"
-        )
-        config['paths']['log_dir'] = f"logs/arwm_variants/{args.arwm_mode}"
+        if args.arwm_mode != 'context_aware':
+            config.setdefault('paths', {})['checkpoint_dir'] = (
+                f"checkpoints/arwm_variants/{args.arwm_mode}"
+            )
+            config['paths']['log_dir'] = f"logs/arwm_variants/{args.arwm_mode}"
     elif args.arwm:
         set_region_attention_mode(config, 'adaptive')
         config.setdefault('paths', {})['checkpoint_dir'] = (
@@ -270,6 +285,12 @@ def train(config: dict, args):
         set_region_attention_mode(config, get_region_attention_mode(config))
     region_mode = get_region_attention_mode(config)
     checkpoint_dir = Path(config['paths']['checkpoint_dir']).resolve()
+    results_dir = Path(config['paths']['results_dir']).resolve()
+    if results_dir.exists() and any(results_dir.iterdir()) and not args.resume:
+        raise FileExistsError(
+            f"Training results directory is not empty: {results_dir}. "
+            "Choose a fresh results directory to preserve prior outputs."
+        )
     output_checkpoints = list(checkpoint_dir.glob('*.pth'))
     if output_checkpoints and (
         not args.resume
@@ -322,6 +343,10 @@ def train(config: dict, args):
         if dataset_name.upper() == 'FER2013':
             train_loader, val_loader, _ = build_fer2013_dataloaders(
                 root_dir=config['dataset']['root'],
+                split_manifest=config['dataset'].get('split_manifest'),
+                class_balanced_sampling=config['training'].get(
+                    'class_balanced_sampling', False
+                ),
                 image_size=config['dataset']['image_size'],
                 batch_size=config['training']['batch_size'],
                 num_workers=config['training']['num_workers'],
@@ -343,9 +368,84 @@ def train(config: dict, args):
 
         logger.info(f"Train batches: {len(train_loader)} | "
                     f"Val batches:   {len(val_loader)}")
+        resolved_config_path = logger.run_dir / "resolved_config.yaml"
+        with resolved_config_path.open("x", encoding="utf-8") as config_file:
+            yaml.safe_dump(config, config_file, sort_keys=False)
+        environment_path = logger.run_dir / "environment.json"
+        environment = {
+            "python_version": platform.python_version(),
+            "torch_version": torch.__version__,
+            "cuda_runtime": torch.version.cuda,
+            "cuda_available": torch.cuda.is_available(),
+            "device": str(device),
+            "gpu_name": (
+                torch.cuda.get_device_name(device)
+                if device.type == "cuda" else None
+            ),
+            "region_attention_mode": region_mode,
+            "seed": seed,
+            "dataset": dataset_name,
+            "class_names": config["dataset"]["class_names"],
+            "image_size": config["dataset"]["image_size"],
+            "batch_size": config["training"]["batch_size"],
+            "train_samples": len(train_loader.dataset),
+            "validation_samples": len(val_loader.dataset),
+        }
+        with environment_path.open("x", encoding="utf-8") as environment_file:
+            json.dump(environment, environment_file, indent=2)
 
         # ---- Model ----
         model = build_framework(config).to(device)
+        if args.init_from:
+            if args.resume:
+                raise ValueError("--init-from and --resume cannot be used together")
+            if not os.path.isfile(args.init_from):
+                raise FileNotFoundError(
+                    f"Initialization checkpoint not found: {args.init_from}"
+                )
+            source = torch.load(
+                args.init_from, map_location='cpu', weights_only=True
+            )
+            source_state = source.get('model') if isinstance(source, dict) else None
+            if not isinstance(source_state, dict):
+                raise ValueError(
+                    "Initialization checkpoint must contain a 'model' state dictionary"
+                )
+            destination = model.state_dict()
+            compatible = {
+                key: value for key, value in source_state.items()
+                if key.startswith('spatial_encoder.')
+                and key in destination
+                and destination[key].shape == value.shape
+            }
+            incompatible = model.load_state_dict(compatible, strict=False)
+            skipped_source = sorted(set(source_state) - set(compatible))
+            transfer_report = {
+                "source_checkpoint": str(Path(args.init_from).resolve()),
+                "transfer_scope": "shape-compatible spatial_encoder parameters only",
+                "transferred_keys": sorted(compatible),
+                "newly_initialized_keys": sorted(incompatible.missing_keys),
+                "skipped_source_keys": skipped_source,
+            }
+            (logger.run_dir / "weight_transfer_report.json").write_text(
+                json.dumps(transfer_report, indent=2), encoding="utf-8"
+            )
+            logger.info(
+                f"Partial initialization from {args.init_from}: "
+                f"transferred={len(compatible)}, "
+                f"newly_initialized={len(incompatible.missing_keys)}, "
+                f"skipped_source={skipped_source}"
+            )
+            logger.info(
+                f"New/untransferred model keys ({len(incompatible.missing_keys)}): "
+                f"{incompatible.missing_keys}"
+            )
+        amp_enabled = (
+            bool(config['training'].get('mixed_precision', False))
+            and device.type == 'cuda'
+        )
+        scaler = torch.amp.GradScaler('cuda', enabled=amp_enabled)
+        logger.info(f"Mixed precision enabled: {amp_enabled}")
         freeze_epochs = config['training'].get('freeze_backbone_epochs', 0)
         if freeze_epochs > 0:
             model.freeze_backbone()
@@ -400,21 +500,39 @@ def train(config: dict, args):
 
         # ---- Resume from checkpoint ----
         start_epoch = 1
+        completed_epochs = 0
+        prior_training_duration_seconds = 0.0
         resume_early_stopping_state = None
         if args.resume and not os.path.isfile(args.resume):
             raise FileNotFoundError(f"Resume checkpoint not found: {args.resume}")
         if args.resume:
+            if Path(args.resume).resolve().parent != checkpoint_dir:
+                raise ValueError(
+                    "Resume checkpoints must come from this config's isolated "
+                    f"directory: {checkpoint_dir}"
+                )
             ckpt = torch.load(
-                args.resume, map_location=device, weights_only=False
+                args.resume, map_location=device, weights_only=True
             )
             validate_checkpoint_region_mode(ckpt, region_mode, args.resume)
             experiment_metadata = ckpt.get('experiment', {})
+            prior_training_duration_seconds = float(
+                experiment_metadata.get('training_duration_seconds', 0.0)
+            )
             saved_training_config = experiment_metadata.get('training_config')
-            if saved_training_config is not None and saved_training_config != config:
-                raise ValueError(
-                    f"Resume checkpoint training configuration does not match "
-                    f"the current config: {args.resume}"
-                )
+            if saved_training_config is not None:
+                # Output paths may change when continuing into an isolated
+                # directory. All data, model, and training settings must still
+                # match the checkpoint configuration.
+                saved_config_for_resume = dict(saved_training_config)
+                current_config_for_resume = dict(config)
+                saved_config_for_resume.pop('paths', None)
+                current_config_for_resume.pop('paths', None)
+                if saved_config_for_resume != current_config_for_resume:
+                    raise ValueError(
+                        f"Resume checkpoint training configuration does not match "
+                        f"the current config (excluding output paths): {args.resume}"
+                    )
             saved_seed = experiment_metadata.get('seed')
             configured_seed = config['training'].get('seed', 42)
             if saved_seed is not None and saved_seed != configured_seed:
@@ -424,7 +542,10 @@ def train(config: dict, args):
                 )
             model.load_state_dict(ckpt['model'])
             optimizer.load_state_dict(ckpt['optimizer'])
+            if 'scaler' in ckpt and scaler.is_enabled():
+                scaler.load_state_dict(ckpt['scaler'])
             start_epoch = ckpt['epoch'] + 1
+            completed_epochs = ckpt['epoch']
             if 'scheduler' in ckpt:
                 scheduler.load_state_dict(ckpt['scheduler'])
             elif scheduler_name == 'StepLR':
@@ -436,7 +557,7 @@ def train(config: dict, args):
                 torch.load(
                     best_checkpoint_path,
                     map_location='cpu',
-                    weights_only=False,
+                    weights_only=True,
                 )
                 if os.path.isfile(best_checkpoint_path)
                 else ckpt
@@ -466,6 +587,9 @@ def train(config: dict, args):
                     f"completed epoch ({ckpt['epoch']})."
                 )
             logger.best_val_acc = float(best_metrics['accuracy'])
+            logger.best_val_loss = float(
+                best_metrics.get('mean_loss', float('inf'))
+            )
             logger.best_epoch = int(best_checkpoint.get('epoch', ckpt['epoch']))
             resume_early_stopping_state = ckpt.get(
                 'experiment', {}
@@ -473,10 +597,22 @@ def train(config: dict, args):
             rng_state = ckpt.get('rng_state')
             if rng_state is not None:
                 random.setstate(rng_state['python'])
-                np.random.set_state(rng_state['numpy'])
+                numpy_rng_state = rng_state['numpy']
+                if isinstance(numpy_rng_state, dict):
+                    np.random.set_state((
+                        numpy_rng_state['bit_generator'],
+                        np.asarray(numpy_rng_state['state'], dtype=np.uint32),
+                        int(numpy_rng_state['position']),
+                        int(numpy_rng_state['has_gauss']),
+                        float(numpy_rng_state['cached_gaussian']),
+                    ))
+                else:
+                    np.random.set_state(numpy_rng_state)
                 torch.set_rng_state(rng_state['torch'].cpu())
                 if device.type == 'cuda' and rng_state.get('cuda') is not None:
-                    torch.cuda.set_rng_state_all(rng_state['cuda'])
+                    torch.cuda.set_rng_state_all(
+                        [state.cpu() for state in rng_state['cuda']]
+                    )
             logger.info(f"Resumed from checkpoint: {args.resume} "
                         f"(epoch {ckpt['epoch']})")
 
@@ -510,6 +646,7 @@ def train(config: dict, args):
         # ---- Training loop ----
         num_epochs = config['training']['num_epochs']
         logger.info(f"Starting training for {num_epochs} epochs...")
+        training_started_at = time.monotonic()
 
         for epoch in range(start_epoch, num_epochs + 1):
             t0 = time.time()
@@ -521,27 +658,48 @@ def train(config: dict, args):
                 logger.info(f"Epoch {epoch}: Swin backbone UNFROZEN.")
 
             # Train one epoch
-            train_mets = train_epoch(
-                model, train_loader, criterion, optimizer, device,
-                train_metrics_acc, epoch,
-                log_interval=config['logging']['log_interval'],
-                logger=logger,
-            )
+            try:
+                train_mets = train_epoch(
+                    model, train_loader, criterion, optimizer, device,
+                    train_metrics_acc, epoch,
+                    log_interval=config['logging']['log_interval'],
+                    logger=logger,
+                    amp_enabled=amp_enabled,
+                    scaler=scaler,
+                )
+            except RuntimeError as error:
+                if 'out of memory' in str(error).lower():
+                    logger.info(
+                        "CUDA out of memory during training. Reduce "
+                        "training.batch_size in the isolated context-aware config "
+                        "before resuming."
+                    )
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                raise
 
             # Validate
             val_mets = validate_epoch(
                 model, val_loader, criterion, device, val_metrics_acc,
                 region_metrics=val_region_metrics,
+                amp_enabled=amp_enabled,
             )
 
             # LR step
             scheduler.step()
             current_lr = optimizer.param_groups[0]['lr']
+            epoch_duration = time.time() - t0
 
             is_best = val_mets['accuracy'] > logger.best_val_acc
 
             # Log epoch results
-            logger.log_epoch(epoch, train_mets, val_mets, lr=current_lr)
+            logger.log_epoch(
+                epoch,
+                train_mets,
+                val_mets,
+                lr=current_lr,
+                epoch_duration_seconds=epoch_duration,
+            )
 
             should_stop = early_stopping.step(val_mets['accuracy'])
 
@@ -551,6 +709,7 @@ def train(config: dict, args):
                 checkpoint_dir=config['paths']['checkpoint_dir'],
                 is_best=is_best,
                 scheduler=scheduler,
+                scaler=scaler,
                 save_epoch_checkpoint=config['training'].get(
                     'save_epoch_checkpoints', True
                 ),
@@ -558,6 +717,10 @@ def train(config: dict, args):
                     'region_attention_mode': region_mode,
                     'seed': seed,
                     'training_config': config,
+                    'training_duration_seconds': (
+                        prior_training_duration_seconds
+                        + time.monotonic() - training_started_at
+                    ),
                     'early_stopping': {
                         'best_value': early_stopping.best_value,
                         'counter': early_stopping.counter,
@@ -565,6 +728,7 @@ def train(config: dict, args):
                     },
                 },
             )
+            completed_epochs = epoch
 
             # Early stopping check
             if should_stop:
@@ -572,8 +736,10 @@ def train(config: dict, args):
                             f"Best val acc: {early_stopping.best_value:.2f}%")
                 break
 
-            elapsed = time.time() - t0
-            logger.info(f"  Epoch {epoch} completed in {elapsed:.1f}s")
+            logger.info(
+                f"  Epoch {epoch} completed in {epoch_duration:.1f}s "
+                "(training and validation; checkpoint I/O excluded)"
+            )
 
         # ---- Record run results ----
         all_run_results.append({
@@ -583,6 +749,49 @@ def train(config: dict, args):
             'best_epoch':   logger.best_epoch,
         })
         logger.close()
+        results_dir.mkdir(parents=True, exist_ok=True)
+        for filename in (
+            "resolved_config.yaml",
+            "environment.json",
+            "weight_transfer_report.json",
+            "metric_history.json",
+            "training_curves.png",
+        ):
+            source_path = logger.run_dir / filename
+            if source_path.is_file():
+                shutil.copy2(source_path, results_dir / filename)
+        run_summary = {
+            "status": (
+                "completed_requested_epochs"
+                if completed_epochs == num_epochs else "stopped_before_requested_epochs"
+            ),
+            "region_attention_mode": region_mode,
+            "seed": seed,
+            "requested_epochs": num_epochs,
+            "completed_epochs": completed_epochs,
+            "best_epoch": logger.best_epoch,
+            "best_validation_accuracy": logger.best_val_acc,
+            "best_validation_loss": (
+                logger.best_val_loss
+                if logger.best_val_loss != float('inf') else None
+            ),
+            "training_duration_seconds": (
+                prior_training_duration_seconds
+                + time.monotonic() - training_started_at
+            ),
+            "best_checkpoint": str(checkpoint_dir / "best_model.pth"),
+            "final_completed_epoch_checkpoint": (
+                str(checkpoint_dir / f"checkpoint_epoch{completed_epochs:03d}.pth")
+                if completed_epochs > 0 and config['training'].get('save_epoch_checkpoints', True) else None
+            ),
+            "latest_checkpoint": str(checkpoint_dir / "latest_model.pth"),
+            "log_directory": str(logger.run_dir),
+            "results_directory": str(results_dir),
+        }
+        with (results_dir / "run_summary.json").open(
+            "x", encoding="utf-8"
+        ) as summary_file:
+            json.dump(run_summary, summary_file, indent=2)
 
     # ---- Multi-run summary ----
     if n_runs > 1:
@@ -610,14 +819,22 @@ def parse_args():
                         help='Path to config YAML file')
     parser.add_argument('--resume',    type=str, default=None,
                         help='Path to checkpoint for resuming training')
+    parser.add_argument('--init-from', type=str, default=None,
+                        help='Transfer shape-compatible model weights; unmatched keys stay newly initialized')
     parser.add_argument('--dataset',   type=str, default=None,
                         choices=['FANE', 'FER2013'],
                         help='Override dataset choice from config')
+    parser.add_argument(
+        '--split-manifest',
+        type=str,
+        default=None,
+        help='Use reproducibility CSV manifests for a FER2013 split',
+    )
     parser.add_argument('--multi-run', action='store_true',
                         help='Run N independent seeds (paper: 3 runs)')
     parser.add_argument('--arwm', action='store_true',
                         help='Legacy alias for adaptive ARWM; writes to a new variant directory')
-    parser.add_argument('--arwm-mode', choices=['off', 'fixed', 'adaptive'],
+    parser.add_argument('--arwm-mode', choices=['off', 'fixed', 'adaptive', 'context_aware'],
                         default=None,
                         help='Select controlled ARWM mode and use separate outputs')
     parser.add_argument('--gpu',       type=int, default=0,
@@ -634,6 +851,10 @@ if __name__ == '__main__':
 
     # ---- Load config ----
     config = load_config(args.config)
+    if args.split_manifest:
+        if config['dataset']['name'].upper() != 'FER2013':
+            raise ValueError('--split-manifest is only supported for FER2013')
+        config['dataset']['split_manifest'] = args.split_manifest
 
     # ---- Create output directories ----
     for dir_key in ['checkpoint_dir', 'results_dir', 'log_dir']:

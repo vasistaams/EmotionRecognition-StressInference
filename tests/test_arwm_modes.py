@@ -5,9 +5,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import torch
 from torch import nn
 
+from data.augmentations import get_train_transforms
 from scripts.evaluate_arwm_variants import comparable_training_conditions
 from models.swin_fane import AdaptiveRegionWeightingModule, SwinFANEEncoder
 from utils.checkpointing import (
@@ -69,6 +71,11 @@ class ArwmModeTests(unittest.TestCase):
         self.assertTrue(torch.allclose(weights.sum(dim=-1), torch.ones(4), atol=1e-6))
         self.assertEqual(metadata["mode"], "adaptive")
         self.assertFalse(torch.allclose(weights[0], weights[1]))
+
+    def test_train_transform_supports_installed_albumentations_api(self):
+        transform = get_train_transforms(image_size=32)
+        output = transform(image=np.zeros((48, 48, 3), dtype=np.uint8))
+        self.assertEqual(tuple(output["image"].shape), (3, 32, 32))
 
     def test_off_matches_legacy_equation_and_has_no_region_parameters(self):
         encoder = self.make_encoder("off").eval()
@@ -191,6 +198,16 @@ class ArwmModeTests(unittest.TestCase):
                 use_tensorboard=False,
                 use_wandb=False,
             )
+            logger.log_epoch(
+                1,
+                {"mean_loss": 0.5},
+                {"accuracy": 0.5, "f1": 0.5},
+                lr=0.001,
+                epoch_duration_seconds=1.25,
+            )
+            self.assertEqual(
+                logger.metric_history["epoch_duration_seconds"], [1.25]
+            )
             logger.save_checkpoint(
                 model,
                 optimizer,
@@ -218,9 +235,14 @@ class ArwmModeTests(unittest.TestCase):
             self.assertFalse(
                 os.path.isfile(os.path.join(directory, "checkpoint_epoch001.pth"))
             )
+            self.assertTrue(
+                os.path.isfile(
+                    os.path.join(logger.run_dir, "training_curves.png")
+                )
+            )
 
             checkpoint = torch.load(
-                latest_path, map_location="cpu", weights_only=False
+                latest_path, map_location="cpu", weights_only=True
             )
             self.assertEqual(checkpoint["epoch"], 1)
             self.assertIn("scheduler", checkpoint)
@@ -257,7 +279,7 @@ class ArwmModeTests(unittest.TestCase):
         checkpoint = torch.load(
             "checkpoints/fer2013_arwm/best_model.pth",
             map_location="cpu",
-            weights_only=False,
+            weights_only=True,
         )
         validate_checkpoint_region_mode(
             checkpoint, "adaptive", "checkpoints/fer2013_arwm/best_model.pth"
@@ -284,7 +306,7 @@ class ArwmModeTests(unittest.TestCase):
         checkpoint = torch.load(
             "checkpoints/fer2013_weighted_freeze3_lr1e4/best_model.pth",
             map_location="cpu",
-            weights_only=False,
+            weights_only=True,
         )
         model.load_state_dict(checkpoint["model"], strict=True)
         images = torch.linspace(

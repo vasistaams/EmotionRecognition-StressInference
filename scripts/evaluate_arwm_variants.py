@@ -1,4 +1,4 @@
-"""Evaluate available off/fixed/adaptive checkpoints on FER2013 test."""
+"""Evaluate available off/fixed/adaptive/context-aware checkpoints on FER2013 test."""
 
 import argparse
 import csv
@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -16,6 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -33,6 +35,7 @@ DEFAULT_CHECKPOINTS = {
     "off": "checkpoints/fer2013_weighted_freeze3_lr1e4/best_model.pth",
     "fixed": "checkpoints/arwm_variants/fixed/best_model.pth",
     "adaptive": "checkpoints/fer2013_arwm/best_model.pth",
+    "context_aware": "checkpoints/context_aware_arwm/best_model.pth",
 }
 
 
@@ -62,7 +65,7 @@ def evaluate_checkpoint(
     sync_device(device)
     checkpoint_read_start = time.perf_counter()
     checkpoint = torch.load(
-        checkpoint_path, map_location=device, weights_only=False
+        checkpoint_path, map_location="cpu", weights_only=True
     )
     sync_device(device)
     checkpoint_read_seconds = time.perf_counter() - checkpoint_read_start
@@ -86,6 +89,9 @@ def evaluate_checkpoint(
     all_labels = []
     all_predictions = []
     all_probabilities = []
+    all_region_weights = []
+    raw_predictions = []
+    total_test_loss = 0.0
     batch_times = []
     total_model_seconds = 0.0
     samples_seen = 0
@@ -123,9 +129,35 @@ def evaluate_checkpoint(
         total_model_seconds += elapsed
         probabilities = output["probs"].detach().cpu().numpy()
         predictions = probabilities.argmax(axis=1)
-        all_labels.extend(labels.cpu().numpy().tolist())
+        batch_labels = labels.cpu().numpy().tolist()
+        paths = batch["path"]
+        if isinstance(paths, str):
+            paths = [paths]
+        all_labels.extend(batch_labels)
         all_predictions.extend(predictions.tolist())
         all_probabilities.extend(probabilities.tolist())
+        total_test_loss += float(
+            F.cross_entropy(output["logits"], labels, reduction="sum").item()
+        )
+        raw_predictions.extend(
+            {
+                "sample_index": samples_seen + index,
+                "path": str(paths[index]),
+                "true_label": FER2013_CLASSES[int(batch_labels[index])],
+                "predicted_label": FER2013_CLASSES[int(predictions[index])],
+                "probabilities": probabilities[index].tolist(),
+            }
+            for index in range(len(batch_labels))
+        )
+        region_weights = output.get("region_weights")
+        if region_weights is not None:
+            weights = region_weights.detach().cpu().numpy()
+            if weights.shape != (len(labels), 3) or not np.isfinite(weights).all():
+                raise ValueError(
+                    f"Invalid ARWM region-weight output for mode {mode}: "
+                    f"shape={weights.shape}"
+                )
+            all_region_weights.extend(weights.tolist())
         samples_seen += len(labels)
         if samples_seen % 512 < len(labels):
             print(f"[{mode}] Evaluated {samples_seen} test images")
@@ -156,6 +188,34 @@ def evaluate_checkpoint(
         labels, predictions, labels=list(range(len(FER2013_CLASSES)))
     )
     mean_batch_seconds = float(np.mean(batch_times))
+    region_weight_values = np.asarray(all_region_weights, dtype=np.float64)
+    region_weight_analysis = None
+    if len(region_weight_values):
+        region_weight_analysis = {
+            "source": "held-out FER2013 test inputs; internal model weights, not explanations",
+            "number_of_samples": int(len(region_weight_values)),
+            "region_order": ["eye", "eyebrow", "mouth"],
+            "mean": region_weight_values.mean(axis=0).tolist(),
+            "std": region_weight_values.std(axis=0).tolist(),
+            "min": region_weight_values.min(axis=0).tolist(),
+            "max": region_weight_values.max(axis=0).tolist(),
+            "maximum_absolute_normalization_error": float(
+                np.max(np.abs(region_weight_values.sum(axis=1) - 1.0))
+            ),
+            "representative_examples": [
+                {
+                    "test_sample_index": index,
+                    "true_label": FER2013_CLASSES[int(labels[index])],
+                    "predicted_label": FER2013_CLASSES[int(predictions[index])],
+                    "weights": region_weight_values[index].tolist(),
+                }
+                for index in range(min(32, len(region_weight_values)))
+            ],
+            "interpretation": (
+                "Weights are input-conditioned model signals for adaptive mode; "
+                "their variation does not establish causal explanations or improved accuracy."
+            ),
+        }
     result = {
         "status": (
             "complete_test"
@@ -194,6 +254,10 @@ def evaluate_checkpoint(
             },
         },
         "confusion_matrix": confusion.tolist(),
+        "test_loss": float(total_test_loss / samples_seen),
+        "region_weight_analysis": region_weight_analysis,
+        "_region_weight_values": region_weight_values.tolist(),
+        "_raw_predictions": raw_predictions,
         "timing": {
             "method": (
                 "torch.inference_mode; perf_counter around forward_frame only; "
@@ -251,6 +315,41 @@ def write_confusion_plot(results, output_path):
     plt.close(figure)
 
 
+def write_metric_comparison_plot(results, output_path):
+    modes = [
+        mode for mode in ("off", "fixed", "adaptive", "context_aware")
+        if results.get(mode, {}).get("status") == "complete_test"
+    ]
+    if len(modes) < 2:
+        return False
+    metric_names = ("accuracy", "macro_f1", "weighted_f1", "balanced_accuracy")
+    labels = ("Accuracy", "Macro F1", "Weighted F1", "Balanced accuracy")
+    x = np.arange(len(metric_names))
+    width = 0.8 / len(modes)
+    figure, axis = plt.subplots(figsize=(9, 5))
+    for index, mode in enumerate(modes):
+        values = [
+            results[mode]["metrics"][metric] * 100.0
+            for metric in metric_names
+        ]
+        axis.bar(
+            x - 0.4 + width / 2 + index * width,
+            values,
+            width,
+            label=mode,
+        )
+    axis.set_xticks(x, labels)
+    axis.set_ylabel("Score (%)")
+    axis.set_ylim(0, 100)
+    axis.set_title("FER2013 official-test comparison")
+    axis.legend()
+    axis.grid(axis="y", alpha=0.25)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close(figure)
+    return True
+
+
 def comparable_training_conditions(experiment_metadata):
     """Normalize only expected mode/output-path differences between variants."""
     if not isinstance(experiment_metadata, dict):
@@ -271,9 +370,23 @@ def comparable_training_conditions(experiment_metadata):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/config_arwm_50.yaml")
+    parser.add_argument(
+        "--split-manifest",
+        default=None,
+        help="Directory containing train/validation/test CSV manifests",
+    )
+    parser.add_argument(
+        "--test-split",
+        choices=("test_combined", "test_private", "test_public"),
+        default="test_combined",
+    )
     parser.add_argument("--off-checkpoint", default=DEFAULT_CHECKPOINTS["off"])
     parser.add_argument("--fixed-checkpoint", default=DEFAULT_CHECKPOINTS["fixed"])
     parser.add_argument("--adaptive-checkpoint", default=DEFAULT_CHECKPOINTS["adaptive"])
+    parser.add_argument(
+        "--context-aware-checkpoint",
+        default=DEFAULT_CHECKPOINTS["context_aware"],
+    )
     parser.add_argument("--output", default="results/arwm")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--warmup-batches", type=int, default=3)
@@ -286,10 +399,23 @@ def main():
         raise ValueError("--warmup-batches must be non-negative")
     if args.max_samples is not None and args.max_samples < 1:
         raise ValueError("--max-samples must be positive")
+    output_path = Path(args.output)
+    if output_path.exists() and (
+        not output_path.is_dir() or any(output_path.iterdir())
+    ):
+        raise FileExistsError(
+            f"Evaluation output directory already contains files: {args.output}. "
+            "Choose a new directory to preserve prior results."
+        )
 
     config = load_config(args.config)
     if config["dataset"]["name"].upper() != "FER2013":
         raise ValueError("This evaluator currently expects FER2013.")
+    if config["dataset"].get("class_names") != FER2013_CLASSES:
+        raise ValueError(
+            "Configured class order does not match the FER2013 loader: "
+            f"{config['dataset'].get('class_names')!r} vs {FER2013_CLASSES!r}"
+        )
     config.setdefault("model", {}).setdefault("swin", {})["pretrained"] = False
     root = Path(config["dataset"]["root"])
     if not (root / "test").is_dir():
@@ -299,6 +425,10 @@ def main():
     batch_size = args.batch_size or config["training"]["batch_size"]
     _, _, test_loader = build_fer2013_dataloaders(
         root_dir=str(root),
+        split_manifest=(
+            args.split_manifest or config["dataset"].get("split_manifest")
+        ),
+        test_split=args.test_split,
         image_size=config["dataset"]["image_size"],
         batch_size=batch_size,
         num_workers=0,
@@ -310,6 +440,7 @@ def main():
         "off": args.off_checkpoint,
         "fixed": args.fixed_checkpoint,
         "adaptive": args.adaptive_checkpoint,
+        "context_aware": args.context_aware_checkpoint,
     }
     results = {}
     for mode, checkpoint_path in checkpoints.items():
@@ -335,6 +466,22 @@ def main():
             max_samples=args.max_samples,
         )
 
+    region_weight_rows = []
+    prediction_files = {}
+    for mode, result in results.items():
+        values = result.pop("_region_weight_values", [])
+        for index, weights in enumerate(values):
+            region_weight_rows.append({
+                "mode": mode,
+                "test_sample_index": index,
+                "eye_weight": weights[0],
+                "eyebrow_weight": weights[1],
+                "mouth_weight": weights[2],
+            })
+        predictions = result.pop("_raw_predictions", [])
+        if predictions:
+            prediction_files[mode] = predictions
+
     complete_modes = [
         mode for mode, result in results.items()
         if result.get("status") == "complete_test"
@@ -344,15 +491,54 @@ def main():
         for mode in complete_modes
     ]
     fully_comparable = (
-        len(complete_modes) == 3
+        len(complete_modes) == 4
         and all(condition is not None for condition in training_conditions)
         and all(
             condition == training_conditions[0]
             for condition in training_conditions[1:]
         )
     )
+    off_result = results.get("off", {})
+    adaptive_result = results.get("adaptive", {})
+    same_test_samples = (
+        off_result.get("status") == "complete_test"
+        and adaptive_result.get("status") == "complete_test"
+        and off_result.get("number_of_evaluated_samples")
+        == adaptive_result.get("number_of_evaluated_samples")
+    )
+    off_conditions = comparable_training_conditions(
+        off_result.get("experiment_metadata")
+    )
+    adaptive_conditions = comparable_training_conditions(
+        adaptive_result.get("experiment_metadata")
+    )
+    controlled_two_way = (
+        same_test_samples
+        and off_conditions is not None
+        and adaptive_conditions is not None
+        and off_conditions == adaptive_conditions
+    )
+    comparison = {
+        "status": (
+            "controlled_off_vs_adaptive"
+            if controlled_two_way else
+            "unavailable_or_training_conditions_unverified"
+        ),
+        "same_complete_test_sample_count": bool(same_test_samples),
+        "training_conditions_verified_equal": bool(controlled_two_way),
+        "adaptive_minus_off_percentage_points": None,
+    }
+    if same_test_samples:
+        comparison["adaptive_minus_off_percentage_points"] = {
+            metric: (
+                adaptive_result["metrics"][metric]
+                - off_result["metrics"][metric]
+            ) * 100.0
+            for metric in ("accuracy", "macro_f1")
+        }
     report = {
         "evaluation": {
+            "evaluated_at_utc": datetime.now(timezone.utc).isoformat(),
             "dataset": config["dataset"]["name"],
             "dataset_root": str(root),
             "split": "official test",
@@ -374,13 +560,13 @@ def main():
                 "for these test metrics."
             ),
             "comparison_status": (
-                "controlled_three_way_comparison"
+                "controlled_four_way_comparison"
                 if fully_comparable else
                 "incomplete_or_legacy_checkpoints_not_a_controlled_ablation"
             ),
             "comparison_limitation": (
-                "A causal three-way comparison requires trained checkpoints from "
-                "the separate off/fixed/adaptive configs, same seed and hyperparameters. "
+                "A controlled four-way comparison requires trained checkpoints from "
+                "the separate off/fixed/adaptive/context-aware configs, same seed and hyperparameters. "
                 "Legacy checkpoint metadata is insufficient to certify that."
             ),
             "timing_method": (
@@ -389,18 +575,61 @@ def main():
             ),
         },
         "variants": results,
+        "off_vs_adaptive_comparison": comparison,
     }
     os.makedirs(args.output, exist_ok=True)
     json_path = os.path.join(args.output, "metrics.json")
     csv_path = os.path.join(args.output, "metrics.csv")
     plot_path = os.path.join(args.output, "confusion_matrix.png")
     markdown_path = os.path.join(args.output, "evaluation_summary.md")
+    if region_weight_rows:
+        with open(
+            os.path.join(args.output, "region_weight_samples.csv"),
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as file:
+            writer = csv.DictWriter(file, fieldnames=list(region_weight_rows[0]))
+            writer.writeheader()
+            writer.writerows(region_weight_rows)
+        available_modes = [
+            mode for mode in ("off", "fixed", "adaptive", "context_aware")
+            if any(row["mode"] == mode for row in region_weight_rows)
+        ]
+        figure, axes = plt.subplots(
+            1, len(available_modes),
+            figsize=(5 * len(available_modes), 5),
+            squeeze=False,
+        )
+        for axis, mode in zip(axes.flat, available_modes):
+            mode_rows = [row for row in region_weight_rows if row["mode"] == mode]
+            axis.boxplot(
+                [[row[f"{region}_weight"] for row in mode_rows]
+                 for region in ("eye", "eyebrow", "mouth")],
+                showmeans=True,
+            )
+            axis.set_xticks([1, 2, 3], ("Eye", "Eyebrow", "Mouth"))
+            axis.set_ylim(0, 1)
+            axis.set_ylabel("Region weight")
+            axis.set_title(f"{mode}: {len(mode_rows)} test samples")
+            axis.grid(axis="y", alpha=0.25)
+        figure.suptitle(
+            "ARWM region weights on held-out inputs (internal signals, not explanations)"
+        )
+        figure.tight_layout()
+        figure.savefig(
+            os.path.join(args.output, "arwm_region_weights.png"),
+            dpi=160,
+            bbox_inches="tight",
+        )
+        plt.close(figure)
+
     with open(json_path, "w", encoding="utf-8") as file:
         json.dump(report, file, indent=2, default=str)
     csv_columns = [
         "mode", "status", "checkpoint", "number_of_evaluated_samples",
         "accuracy", "balanced_accuracy", "macro_precision", "macro_recall",
-        "macro_f1", "weighted_f1", "class_name", "class_precision",
+        "macro_f1", "weighted_f1", "test_loss", "class_name", "class_precision",
         "class_recall", "class_f1", "class_support",
         "trainable_parameters", "total_parameters", "mean_latency_ms_per_image",
         "throughput_images_per_second", "model_construction_seconds",
@@ -423,6 +652,7 @@ def main():
                 "macro_recall": metrics.get("macro_recall"),
                 "macro_f1": metrics.get("macro_f1"),
                 "weighted_f1": metrics.get("weighted_f1"),
+                "test_loss": result.get("test_loss"),
                 "trainable_parameters": result.get("trainable_parameters"),
                 "total_parameters": result.get("total_parameters"),
                 "mean_latency_ms_per_image": result.get("timing", {}).get("mean_latency_ms_per_image"),
@@ -443,11 +673,59 @@ def main():
                     "class_f1": class_metrics["f1"],
                     "class_support": class_metrics["support"],
                 })
+    probability_columns = [
+        f"probability_{class_name}" for class_name in FER2013_CLASSES
+    ]
+    for mode, rows in prediction_files.items():
+        predictions_path = os.path.join(
+            args.output, f"predictions_{mode}.csv"
+        )
+        with open(
+            predictions_path,
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as file:
+            columns = [
+                "sample_index",
+                "path",
+                "true_label",
+                "predicted_label",
+                *probability_columns,
+            ]
+            writer = csv.DictWriter(file, fieldnames=columns)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({
+                    "sample_index": row["sample_index"],
+                    "path": row["path"],
+                    "true_label": row["true_label"],
+                    "predicted_label": row["predicted_label"],
+                    **dict(zip(probability_columns, row["probabilities"])),
+                })
+        confusion_path = os.path.join(
+            args.output, f"confusion_matrix_{mode}.csv"
+        )
+        with open(confusion_path, "w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(["true\\predicted", *FER2013_CLASSES])
+            for class_name, row in zip(
+                FER2013_CLASSES,
+                results[mode]["confusion_matrix"],
+            ):
+                writer.writerow([class_name, *row])
     write_confusion_plot(results, plot_path)
+    comparison_plot_path = os.path.join(args.output, "arwm_comparison.png")
+    comparison_plot_written = write_metric_comparison_plot(
+        results, comparison_plot_path
+    )
+    if comparison_plot_written:
+        print(f"Saved: {comparison_plot_path}")
 
     lines = [
         "# ARWM Variant Evaluation",
         "",
+        f"- Evaluated at (UTC): {report['evaluation']['evaluated_at_utc']}",
         f"- Dataset/split: {config['dataset']['name']} official test",
         f"- Samples in split: {len(test_loader.dataset)}",
         f"- Device: {device}",
@@ -475,8 +753,28 @@ def main():
         )
         if result.get("limitation"):
             lines.append(f"\n{mode} limitation: {result['limitation']}")
+        weight_summary = result.get("region_weight_analysis")
+        if weight_summary is not None:
+            lines.append(
+                f"\n{mode} region weights: mean="
+                f"{[round(value, 4) for value in weight_summary['mean']]}, "
+                f"std={[round(value, 4) for value in weight_summary['std']]}, "
+                f"normalization error="
+                f"{weight_summary['maximum_absolute_normalization_error']:.2e}. "
+                "These are internal model signals, not explanations."
+            )
     lines.extend([
         "",
+        f"- Off vs Adaptive comparison: **{comparison['status']}**",
+    ])
+    if comparison["adaptive_minus_off_percentage_points"] is not None:
+        differences = comparison["adaptive_minus_off_percentage_points"]
+        lines.append(
+            "- Adaptive minus Off: "
+            f"accuracy {differences['accuracy']:+.3f} pp; "
+            f"macro-F1 {differences['macro_f1']:+.3f} pp."
+        )
+    lines.extend([
         "A result is not a controlled ARWM ablation unless the variants were trained with the same data split, seed, model-selection rule, and training hyperparameters. Unavailable checkpoints are not substituted with validation scores.",
         "",
     ])

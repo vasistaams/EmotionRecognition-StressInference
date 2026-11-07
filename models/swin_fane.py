@@ -30,6 +30,7 @@ from typing import Dict, Optional, Tuple
 
 from models.swin_transformer import build_swin_backbone
 from models.fane_module import FANEModule
+from models.context_aware_arwm import ContextAwareRegionWeightingModule
 
 
 class AdaptiveRegionWeightingModule(nn.Module):
@@ -312,23 +313,36 @@ class SwinFANEEncoder(nn.Module):
         resolved_region_mode = region_attention_mode or (
             "adaptive" if region_attention_enabled else "off"
         )
-        if resolved_region_mode not in {"off", "fixed", "adaptive"}:
+        if resolved_region_mode not in {"off", "fixed", "adaptive", "context_aware"}:
             raise ValueError(
                 f"Unknown region-attention mode: {resolved_region_mode!r}; "
-                "expected 'off', 'fixed', or 'adaptive'"
+                "expected 'off', 'fixed', 'adaptive', or 'context_aware'"
             )
         self.region_attention_mode = resolved_region_mode
-        self.region_attention = (
-            AdaptiveRegionWeightingModule(
-                feature_dim=native_dim,
-                hidden_dim=region_attention_hidden_dim,
-                enabled=region_attention_enabled,
-                fusion_weight=region_attention_fusion_weight,
-                fallback_to_global=region_attention_fallback_to_global,
-                mode=resolved_region_mode,
-            )
-            if resolved_region_mode != "off" else None
-        )
+        if resolved_region_mode == "off":
+            self.region_attention = None
+        elif resolved_region_mode == "context_aware":
+            # ARWM-specific initialization must not shift the CPU RNG stream
+            # used by common components created below (notably the classifier).
+            # Modules are constructed on CPU here, so there are no CUDA random
+            # draws to isolate; fork_rng restores the CPU state on exit.
+            with torch.random.fork_rng(devices=[]):
+                self.region_attention = ContextAwareRegionWeightingModule(
+                    feature_dim=native_dim,
+                    hidden_dim=region_attention_hidden_dim,
+                    fusion_weight=region_attention_fusion_weight,
+                    fallback_to_global=region_attention_fallback_to_global,
+                )
+        else:
+            with torch.random.fork_rng(devices=[]):
+                self.region_attention = AdaptiveRegionWeightingModule(
+                    feature_dim=native_dim,
+                    hidden_dim=region_attention_hidden_dim,
+                    enabled=region_attention_enabled,
+                    fusion_weight=region_attention_fusion_weight,
+                    fallback_to_global=region_attention_fallback_to_global,
+                    mode=resolved_region_mode,
+                )
 
         # ---- Projection from FANE output (native_dim) → embedding_dim ----
         # Only needed if FANE output dim != embedding_dim
@@ -384,7 +398,12 @@ class SwinFANEEncoder(nn.Module):
         region_weights = None
         region_meta = {'enabled': False, 'mode': 'off'}
         if self.region_attention is not None:
-            z_region, region_weights, region_meta = self.region_attention(F)
+            if self.region_attention_mode == "context_aware":
+                z_region, region_weights, region_meta = self.region_attention(
+                    F, global_context=F.mean(dim=1)
+                )
+            else:
+                z_region, region_weights, region_meta = self.region_attention(F)
             z_region = self.fane_proj(z_region)
 
         # Project FANE embedding to target dimension

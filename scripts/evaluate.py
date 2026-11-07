@@ -23,17 +23,24 @@ import os
 import sys
 import argparse
 import json
+import csv
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
 from models.full_framework import build_framework
 from data.fane_dataset import build_fane_dataloaders, FANEDataset
-from data.fer2013_dataset import build_fer2013_dataloaders
-from data.augmentations import get_robustness_transform
+from data.fer2013_dataset import (
+    FER2013_CLASSES,
+    FER2013FolderDataset,
+    build_fer2013_dataloaders,
+)
+from data.augmentations import get_robustness_transform, get_val_transforms
 from utils.metrics import (
     EmotionMetrics,
     summarize_region_weights,
@@ -61,6 +68,12 @@ from utils.visualisation import (
     plot_region_weights_by_emotion,
 )
 from sklearn.metrics import roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    precision_recall_fscore_support,
+)
 from utils.checkpointing import validate_checkpoint_region_mode
 from utils.configuration import get_region_attention_mode, load_config, set_region_attention_mode
 
@@ -113,6 +126,322 @@ def evaluate_frame_level(
             all_region_weights, all_labels, num_classes=num_classes
         ) if all_region_weights is not None else None,
     }
+
+
+@torch.inference_mode()
+def evaluate_fer2013_official_test(
+    config: dict,
+    config_path: str,
+    checkpoint_path: str,
+    output_dir: str = None,
+) -> Path:
+    """Evaluate only the official FER2013 test folders and save isolated outputs."""
+    dataset_config = config["dataset"]
+    if dataset_config["name"].upper() != "FER2013":
+        raise ValueError("--fer2013-test-only requires dataset.name=FER2013")
+    if dataset_config["num_classes"] != len(FER2013_CLASSES):
+        raise ValueError(
+            f"Expected {len(FER2013_CLASSES)} FER2013 classes, "
+            f"got {dataset_config['num_classes']}"
+        )
+    configured_names = dataset_config.get("class_names")
+    if configured_names is not None and configured_names != FER2013_CLASSES:
+        raise ValueError(
+            "Configured class_names do not match the FER2013 model label order: "
+            f"{FER2013_CLASSES}"
+        )
+
+    dataset_root = Path(dataset_config["root"])
+    test_root = dataset_root / "test"
+    if not test_root.is_dir():
+        raise FileNotFoundError(f"Official FER2013 test split not found: {test_root}")
+    if output_dir is not None and Path(output_dir).exists():
+        raise FileExistsError(
+            f"Output directory already exists; refusing to overwrite: {output_dir}"
+        )
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+    if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("model"), dict):
+        raise ValueError(f"Invalid model checkpoint: {checkpoint_path}")
+    region_mode = get_region_attention_mode(config)
+    validate_checkpoint_region_mode(checkpoint, region_mode, checkpoint_path)
+
+    config.setdefault("model", {}).setdefault("swin", {})["pretrained"] = False
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_framework(config).to(device)
+    model.load_state_dict(checkpoint["model"], strict=True)
+    model.eval()
+
+    test_dataset = FER2013FolderDataset(
+        root_dir=str(dataset_root),
+        split="test",
+        image_size=dataset_config["image_size"],
+        transform=get_val_transforms(dataset_config["image_size"]),
+    )
+    if not len(test_dataset):
+        raise RuntimeError(f"Official FER2013 test split is empty: {test_root}")
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config["training"]["batch_size"],
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+    )
+
+    all_labels = []
+    all_predictions = []
+    all_probabilities = []
+    all_region_weights = []
+    loss_sum = 0.0
+    criterion = torch.nn.CrossEntropyLoss(reduction="sum")
+    for batch in test_loader:
+        images = batch["image"].to(device)
+        labels = batch["label"].to(device)
+        output = model.forward_frame(images)
+        logits = output["logits"]
+        if output.get("region_weights") is not None:
+            all_region_weights.extend(
+                output["region_weights"].detach().cpu().float().tolist()
+            )
+        loss_sum += float(criterion(logits, labels).item())
+        probabilities = torch.softmax(logits, dim=1).cpu().numpy()
+        all_probabilities.append(probabilities)
+        all_labels.extend(labels.cpu().numpy().tolist())
+        all_predictions.extend(probabilities.argmax(axis=1).tolist())
+
+    labels = np.asarray(all_labels, dtype=np.int64)
+    predictions = np.asarray(all_predictions, dtype=np.int64)
+    probabilities = np.concatenate(all_probabilities, axis=0)
+    precision, recall, f1, support = precision_recall_fscore_support(
+        labels,
+        predictions,
+        labels=list(range(len(FER2013_CLASSES))),
+        average=None,
+        zero_division=0,
+    )
+    macro_precision, macro_recall, macro_f1, _ = precision_recall_fscore_support(
+        labels,
+        predictions,
+        labels=list(range(len(FER2013_CLASSES))),
+        average="macro",
+        zero_division=0,
+    )
+    try:
+        roc_auc = float(roc_auc_score(
+            labels,
+            probabilities,
+            labels=list(range(len(FER2013_CLASSES))),
+            multi_class="ovr",
+            average="macro",
+        ))
+        roc_auc_note = None
+    except ValueError as error:
+        roc_auc = None
+        roc_auc_note = str(error)
+
+    metrics = {
+        "accuracy": float(accuracy_score(labels, predictions)),
+        "balanced_accuracy": float(balanced_accuracy_score(labels, predictions)),
+        "macro_precision": float(macro_precision),
+        "macro_recall": float(macro_recall),
+        "macro_f1": float(macro_f1),
+        "roc_auc_ovr_macro": roc_auc,
+        "roc_auc_unavailable_reason": roc_auc_note,
+        "test_loss": loss_sum / len(labels),
+    }
+    per_class = [
+        {
+            "label": index,
+            "class_name": class_name,
+            "precision": float(precision[index]),
+            "recall": float(recall[index]),
+            "f1": float(f1[index]),
+            "support": int(support[index]),
+        }
+        for index, class_name in enumerate(FER2013_CLASSES)
+    ]
+    region_weight_summary = None
+    if all_region_weights:
+        region_array = np.asarray(all_region_weights, dtype=np.float64)
+        region_names = ("eye", "eyebrow", "mouth")
+        region_weight_summary = {
+            "interpretation": (
+                "Context-aware model attention weights are internal signals, "
+                "not causal explanations or psychological measurements."
+            ),
+            "mean": dict(zip(region_names, region_array.mean(axis=0).tolist())),
+            "std": dict(zip(region_names, region_array.std(axis=0).tolist())),
+        }
+    confusion = confusion_matrix(
+        labels,
+        predictions,
+        labels=list(range(len(FER2013_CLASSES))),
+    )
+    evaluated_at = datetime.now(timezone.utc).astimezone().isoformat()
+    result = {
+        "result_type": "newly evaluated official test-split results",
+        "evaluated_at": evaluated_at,
+        "checkpoint": {
+            "filename": Path(checkpoint_path).name,
+            "path": str(Path(checkpoint_path).resolve()),
+            "epoch": checkpoint.get("epoch"),
+            "stored_metrics": checkpoint.get("metrics"),
+            "stored_metrics_note": (
+                "Previously recorded checkpoint metrics; not recomputed by this "
+                "test-set evaluation."
+            ),
+        },
+        "configuration": {
+            "path": str(Path(config_path).resolve()),
+            "dataset": dataset_config["name"],
+            "dataset_root": str(dataset_root.resolve()),
+            "dataset_split": "official FER2013 test folder",
+            "model_region_attention_mode": region_mode,
+            "image_size": dataset_config["image_size"],
+            "class_names_in_label_order": FER2013_CLASSES,
+            "effective_config": config,
+        },
+        "evaluation": {
+            "device": str(device),
+            "sample_count": len(test_dataset),
+            "confusion_matrix_label_order": FER2013_CLASSES,
+            "metric_definitions": {
+                "accuracy": "Fraction of all test predictions that are correct.",
+                "balanced_accuracy": "Mean per-class recall, as a fraction.",
+                "macro_precision": "Unweighted mean of per-class precision.",
+                "macro_recall": "Unweighted mean of per-class recall.",
+                "macro_f1": "Unweighted mean of per-class F1.",
+                "roc_auc_ovr_macro": (
+                    "Macro one-vs-rest multiclass ROC-AUC; null if unsupported "
+                    "by the evaluated labels."
+                ),
+                "test_loss": (
+                    "Unweighted cross-entropy summed over test samples then "
+                    "divided by sample count; no label smoothing."
+                ),
+            },
+            "metrics": metrics,
+            "per_class": per_class,
+            "confusion_matrix": confusion.tolist(),
+            "region_weight_summary": region_weight_summary,
+        },
+    }
+
+    if output_dir is None:
+        timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
+        output_path = Path("results/experiments") / (
+            f"evaluation_{Path(checkpoint_path).stem}_{timestamp}"
+        )
+    else:
+        output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=False)
+    (output_path / "evaluation_metrics.json").write_text(
+        json.dumps(result, indent=2, allow_nan=False), encoding="utf-8"
+    )
+
+    with (output_path / "classification_report.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as report_file:
+        writer = csv.DictWriter(
+            report_file,
+            fieldnames=["label", "class_name", "precision", "recall", "f1", "support"],
+        )
+        writer.writeheader()
+        writer.writerows(per_class)
+
+    if all_region_weights:
+        with (output_path / "region_weights.csv").open(
+            "w", newline="", encoding="utf-8"
+        ) as region_file:
+            writer = csv.DictWriter(
+                region_file,
+                fieldnames=[
+                    "sample_index", "true_label", "predicted_label",
+                    "eye_weight", "eyebrow_weight", "mouth_weight",
+                ],
+            )
+            writer.writeheader()
+            for index, weights in enumerate(all_region_weights):
+                writer.writerow({
+                    "sample_index": index,
+                    "true_label": FER2013_CLASSES[int(labels[index])],
+                    "predicted_label": FER2013_CLASSES[int(predictions[index])],
+                    **dict(zip(("eye_weight", "eyebrow_weight", "mouth_weight"), weights)),
+                })
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(8, 7))
+    image = axis.imshow(confusion, interpolation="nearest", cmap="Blues")
+    figure.colorbar(image, ax=axis)
+    axis.set(
+        xticks=np.arange(len(FER2013_CLASSES)),
+        yticks=np.arange(len(FER2013_CLASSES)),
+        xticklabels=FER2013_CLASSES,
+        yticklabels=FER2013_CLASSES,
+        xlabel="Predicted label",
+        ylabel="True label",
+        title="FER2013 official test confusion matrix",
+    )
+    plt.setp(axis.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+    threshold = confusion.max() / 2.0
+    for row in range(confusion.shape[0]):
+        for column in range(confusion.shape[1]):
+            axis.text(
+                column,
+                row,
+                str(confusion[row, column]),
+                ha="center",
+                va="center",
+                color="white" if confusion[row, column] > threshold else "black",
+            )
+    figure.tight_layout()
+    figure.savefig(output_path / "confusion_matrix.png", dpi=160)
+    plt.close(figure)
+
+    summary_lines = [
+        "# FER2013 official test evaluation",
+        "",
+        f"- Evaluation date: {evaluated_at}",
+        f"- Checkpoint: `{Path(checkpoint_path).name}`",
+        f"- Checkpoint epoch: {checkpoint.get('epoch')}",
+        f"- Configuration: `{Path(config_path).resolve()}`",
+        f"- Dataset split: official FER2013 test folder (`{test_root.resolve()}`)",
+        f"- Evaluated samples: {len(test_dataset)}",
+        f"- Device: {device}",
+        "- Stored checkpoint metrics are historical checkpoint metadata, not "
+        "the newly evaluated test metrics below.",
+        "",
+        "## Newly evaluated metrics",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+    ]
+    summary_lines.extend(
+        f"| {name} | {value if value is not None else 'unavailable'} |"
+        for name, value in metrics.items()
+        if name != "roc_auc_unavailable_reason"
+    )
+    summary_lines.extend([
+        "",
+        "Accuracy, balanced accuracy, precision, recall, F1, and ROC-AUC are "
+        "fractions in [0, 1]. Test loss is unweighted mean cross-entropy without "
+        "label smoothing. Precision/recall/F1 in the CSV report are per-class "
+        "fractions; support is a sample count.",
+        "",
+    ])
+    (output_path / "experiment_summary.md").write_text(
+        "\n".join(summary_lines), encoding="utf-8"
+    )
+    print(f"[Evaluate] Newly evaluated official test metrics saved to {output_path}")
+    print(json.dumps(metrics, indent=2, allow_nan=False))
+    return output_path
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +677,26 @@ def main():
     parser.add_argument('--config',      type=str, required=True)
     parser.add_argument('--checkpoint',  type=str, default=None)
     parser.add_argument('--output',      type=str, default=None)
+    parser.add_argument('--split-manifest', type=str, default=None)
+    parser.add_argument(
+        '--test-split',
+        choices=['test_combined', 'test_private', 'test_public'],
+        default=None,
+    )
+    parser.add_argument(
+        '--fer2013-test-only',
+        action='store_true',
+        help='Evaluate only the official FER2013 test folders and save a unique report directory',
+    )
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default=None,
+        help='Optional new output directory for --fer2013-test-only; must not exist',
+    )
     parser.add_argument('--arwm', action='store_true',
                         help='Legacy alias for --arwm-mode adaptive')
-    parser.add_argument('--arwm-mode', choices=['off', 'fixed', 'adaptive'],
+    parser.add_argument('--arwm-mode', choices=['off', 'fixed', 'adaptive', 'context_aware'],
                         default=None,
                         help='Require a checkpoint trained for the selected mode')
     parser.add_argument('--robustness',  action='store_true',
@@ -368,7 +714,14 @@ def main():
     region_mode = get_region_attention_mode(config)
     arwm_enabled = region_mode != 'off'
     if args.checkpoint is None:
-        if region_mode == 'fixed':
+        if region_mode == 'context_aware':
+            args.checkpoint = os.path.join(
+                config.get('paths', {}).get(
+                    'checkpoint_dir', 'checkpoints/context_aware_arwm'
+                ),
+                'best_model.pth',
+            )
+        elif region_mode == 'fixed':
             args.checkpoint = 'checkpoints/arwm_variants/fixed/best_model.pth'
         elif region_mode == 'adaptive':
             args.checkpoint = os.path.join(
@@ -377,6 +730,15 @@ def main():
             )
         else:
             args.checkpoint = config.get('paths', {}).get('best_model', 'checkpoints/best_model.pth')
+    if args.fer2013_test_only:
+        output_dir = evaluate_fer2013_official_test(
+            config=config,
+            config_path=args.config,
+            checkpoint_path=args.checkpoint,
+            output_dir=args.output_dir,
+        )
+        print(f"[Evaluate] Output directory: {output_dir}")
+        return
     if args.output is None:
         if args.arwm_mode:
             args.output = os.path.join(
@@ -396,10 +758,12 @@ def main():
     config.setdefault('model', {}).setdefault('swin', {})['pretrained'] = False
     model = build_framework(config).to(device)
     checkpoint = torch.load(
-        args.checkpoint, map_location=device, weights_only=False
+        args.checkpoint,
+        map_location="cpu",
+        weights_only=True,
     )
     validate_checkpoint_region_mode(checkpoint, region_mode, args.checkpoint)
-    model.load_state_dict(checkpoint['model'])
+    model.load_state_dict(checkpoint['model'], strict=True)
     print(f"[Evaluate] Loaded checkpoint from: {args.checkpoint}")
     print(f"           (trained to epoch {checkpoint.get('epoch', '?')})")
 
@@ -409,6 +773,14 @@ def main():
     if dataset_name == 'FER2013':
         _, _, test_loader = build_fer2013_dataloaders(
             root_dir=config['dataset']['root'],
+            split_manifest=(
+                args.split_manifest
+                or config['dataset'].get('split_manifest')
+            ),
+            test_split=(
+                args.test_split
+                or config['dataset'].get('test_split', 'test_combined')
+            ),
             image_size=config['dataset']['image_size'],
             batch_size=config['training']['batch_size'],
             num_workers=0,

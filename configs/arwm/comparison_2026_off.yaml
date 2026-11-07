@@ -1,0 +1,32 @@
+base_config: ../config_arwm_50.yaml
+dataset:
+  name: FER2013
+  image_size: 160
+model:
+  swin:
+    input_size: 160
+    pretrained: true
+  region_attention:
+    mode: "off"
+    enabled: false
+training:
+  seed: 42
+  num_runs: 1
+  num_epochs: 50
+  batch_size: 32
+  optimizer: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  scheduler: StepLR
+  step_size: 15
+  gamma: 0.5
+  mixed_precision: true
+  early_stopping_patience: 51
+  save_epoch_checkpoints: false
+paths:
+  checkpoint_dir: checkpoints/arwm_comparison_2026/off
+  arwm_checkpoint_dir: checkpoints/arwm_comparison_2026/off
+  arwm_log_dir: logs/arwm_comparison_2026/off
+  log_dir: logs/arwm_comparison_2026/off
+  results_dir: results/arwm_comparison_2026/off
+  best_model: checkpoints/arwm_comparison_2026/off/best_model.pth

@@ -12,6 +12,8 @@ def infer_checkpoint_region_mode(checkpoint: Dict[str, Any]) -> str:
         state = checkpoint.get("model", checkpoint)
         keys = set(state)
         prefix = "spatial_encoder.region_attention."
+        if any(key.startswith(prefix + "local_weight") for key in keys):
+            return "context_aware"
         has_region_projection = any(
             key.startswith(prefix + "region_proj.") for key in keys
         )
@@ -21,7 +23,7 @@ def infer_checkpoint_region_mode(checkpoint: Dict[str, Any]) -> str:
         if not has_region_projection:
             return "off"
         mode = "adaptive" if has_adaptive_mlp else "fixed"
-    if mode not in {"off", "fixed", "adaptive"}:
+    if mode not in {"off", "fixed", "adaptive", "context_aware"}:
         raise ValueError(
             f"Checkpoint declares unsupported ARWM mode {mode!r}"
         )

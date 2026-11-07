@@ -74,7 +74,7 @@ def select_examples(records, limit: int = 16):
     return selected
 
 
-def read_crop(cap, item):
+def read_crop(cap, item, image_size=160):
     frame_index = int(item["frame_index"])
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
     ok, frame = cap.read()
@@ -88,15 +88,15 @@ def read_crop(cap, item):
     if crop.size == 0:
         raise ValueError(f"Empty crop at frame {frame_index}: {(x1, y1, x2, y2)}")
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    return cv2.resize(gray, (160, 160), interpolation=cv2.INTER_AREA)
+    return cv2.resize(gray, (image_size, image_size), interpolation=cv2.INTER_AREA)
 
 
-def make_contact_sheet(cap, examples, output_path):
+def make_contact_sheet(cap, examples, output_path, video_name="video", image_size=160):
     columns = 4
     rows = math.ceil(len(examples) / columns)
     fig, axes = plt.subplots(rows, columns, figsize=(16, rows * 4.3), squeeze=False)
     for axis, item in zip(axes.flat, examples):
-        gray = read_crop(cap, item)
+        gray = read_crop(cap, item, image_size=image_size)
         face = item["face"]
         axis.imshow(gray, cmap="gray", vmin=0, vmax=255)
         axis.set_title(
@@ -109,7 +109,7 @@ def make_contact_sheet(cap, examples, output_path):
     for axis in axes.flat[len(examples):]:
         axis.axis("off")
     fig.suptitle(
-        "testvideo2 face crops — low p is model confidence, not classification accuracy",
+        f"{video_name} face crops — low p is model confidence, not classification accuracy",
         fontsize=14,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
@@ -117,19 +117,24 @@ def make_contact_sheet(cap, examples, output_path):
     plt.close(fig)
 
 
-def make_mask_visualization(cap, examples, output_path):
+def make_mask_visualization(
+    cap, examples, output_path, image_size=160, video_name="video"
+):
     module = AdaptiveRegionWeightingModule(
         feature_dim=1024,
         hidden_dim=128,
         enabled=True,
     )
+    tokens_per_side = max(1, image_size // 32)
     masks = {
-        name: module._make_region_mask(5, name).reshape(5, 5).numpy()
+        name: module._make_region_mask(tokens_per_side, name)
+        .reshape(tokens_per_side, tokens_per_side)
+        .numpy()
         for name, _ in REGIONS
     }
     fig, axes = plt.subplots(len(examples), 4, figsize=(14, 3.6 * len(examples)), squeeze=False)
     for row, item in enumerate(examples):
-        gray = read_crop(cap, item)
+        gray = read_crop(cap, item, image_size=image_size)
         base = np.repeat((gray.astype(np.float32) / 255.0)[..., None], 3, axis=2)
         axes[row, 0].imshow(gray, cmap="gray", vmin=0, vmax=255)
         face = item["face"]
@@ -142,13 +147,13 @@ def make_mask_visualization(cap, examples, output_path):
             token_mask = masks[name]
             expanded = cv2.resize(
                 token_mask,
-                (160, 160),
+                (image_size, image_size),
                 interpolation=cv2.INTER_NEAREST,
             )
             alpha = (0.65 * expanded)[..., None]
             overlay = base * (1.0 - alpha) + color[None, None, :] * alpha
             axes[row, column].imshow(np.clip(overlay, 0, 1))
-            for coordinate in range(32, 160, 32):
+            for coordinate in range(32, image_size, 32):
                 axes[row, column].axvline(coordinate - 0.5, color="white", linewidth=0.6)
                 axes[row, column].axhline(coordinate - 0.5, color="white", linewidth=0.6)
             axes[row, column].set_title(
@@ -158,7 +163,8 @@ def make_mask_visualization(cap, examples, output_path):
             axis.set_xticks([])
             axis.set_yticks([])
     fig.suptitle(
-        "ARWM 5x5 geometric priors (overlay opacity follows each mask value)",
+        f"ARWM geometric token-mask priors for {video_name} "
+        "(not model activation maps)",
         fontsize=14,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
@@ -171,6 +177,7 @@ def main():
     parser.add_argument("--video", required=True)
     parser.add_argument("--log", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--image-size", type=int, default=160)
     parser.add_argument("--limit", type=int, default=16)
     args = parser.parse_args()
     if args.limit < 1:
@@ -187,7 +194,11 @@ def main():
         raise IOError(f"Cannot open video: {args.video}")
     try:
         make_contact_sheet(
-            cap, examples, os.path.join(args.output_dir, "face_contact_sheet.jpg")
+            cap,
+            examples,
+            os.path.join(args.output_dir, "face_contact_sheet.jpg"),
+            video_name=Path(args.video).name,
+            image_size=args.image_size,
         )
         weight_ranked = sorted(
             (
@@ -211,6 +222,8 @@ def main():
             cap,
             mask_examples,
             os.path.join(args.output_dir, "arwm_token_masks.jpg"),
+            image_size=args.image_size,
+            video_name=Path(args.video).name,
         )
     finally:
         cap.release()

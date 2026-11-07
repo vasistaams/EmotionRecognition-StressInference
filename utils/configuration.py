@@ -34,19 +34,19 @@ def get_region_attention_mode(config: Dict[str, Any]) -> str:
     mode = region.get("mode")
     if mode is None:
         mode = "adaptive" if region.get("enabled", False) else "off"
-    if mode not in {"off", "fixed", "adaptive"}:
+    if mode not in {"off", "fixed", "adaptive", "context_aware"}:
         raise ValueError(
             f"Invalid model.region_attention.mode: {mode!r}; "
-            "expected 'off', 'fixed', or 'adaptive'"
+            "expected 'off', 'fixed', 'adaptive', or 'context_aware'"
         )
     return mode
 
 
 def set_region_attention_mode(config: Dict[str, Any], mode: str) -> None:
     """Set the canonical mode and keep the legacy enabled flag synchronized."""
-    if mode not in {"off", "fixed", "adaptive"}:
+    if mode not in {"off", "fixed", "adaptive", "context_aware"}:
         raise ValueError(
-            f"Invalid ARWM mode: {mode!r}; expected 'off', 'fixed', or 'adaptive'"
+            f"Invalid ARWM mode: {mode!r}; expected off, fixed, adaptive, or context_aware"
         )
     region = config.setdefault("model", {}).setdefault("region_attention", {})
     region["mode"] = mode

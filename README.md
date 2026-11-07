@@ -110,18 +110,42 @@ python scripts/evaluate.py --config configs/config.yaml --checkpoint checkpoints
 ```bash
 python scripts/infer_video.py \
   --video path/to/video.mp4 \
-  --checkpoint checkpoints/fer2013_arwm/best_model.pth \
-  --config configs/config_arwm_50.yaml \
+  --checkpoint checkpoints/best_model.pth \
+  --config configs/arwm/adaptive.yaml \
+  --arwm-mode adaptive \
   --face-mode all \
-  --output results/video_output
+  --frame-stride 3 \
+  --temporal-analysis
 ```
 
 Video inference detects faces on a downscaled frame, maps boxes back to the source
 frame, and preprocesses each detected crop with the FER2013 grayscale-to-RGB and
 ImageNet-normalization pipeline. `--face-mode` accepts `largest`, `selected`, or
 `all`; `--face-index` selects a zero-based area-ranked face in `selected` mode.
-Inference writes a per-frame JSON log, per-class CSV probabilities, and annotated
-sample frames to the output directory.
+Each run always writes `annotated_video.mp4`, `emotion_timeline.png`,
+`stress_trajectory.png`, `temporal_analysis.png`, and `results.json`. The annotated
+video adds a black information panel and stress-proxy bar around the full-size
+source frame, retaining its aspect ratio and FPS. If no face is predicted, plots
+are still generated with an explicit no-data notice. `--temporal-analysis` remains
+as a compatibility flag; these outputs are now included by default.
+
+Transition, persistence, and volatility values are computed from actual per-track
+frame predictions and video timestamps. The displayed stress is a deterministic
+proxy from emotion probabilities, not a learned or validated stress prediction.
+This frame-inference path does not treat temporal-head checkpoint weights as
+trained temporal predictions. `--no-annotate` is rejected because the annotated
+video is required; `--no-log` only skips ancillary logs, CSV files, and frame
+samples, never the required JSON and plots.
+
+By default, output is saved to `results/<video-stem>/`. For the existing
+`testvideo1.mp4`, use:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\infer_video.py --video data\videos\testvideo1.mp4 --checkpoint checkpoints\best_model.pth --config configs\arwm\adaptive.yaml --arwm-mode adaptive --face-mode all --frame-stride 3 --temporal-analysis
+```
+
+An explicit output directory can still be selected with `--output`. Inference
+refuses to overwrite a non-empty output directory.
 
 ---
 
@@ -147,22 +171,39 @@ Explicit ARWM-mode training refuses to reuse a variant directory containing
 checkpoints. To repeat a run, copy its mode config and set fresh checkpoint, log,
 and result paths first.
 
-The full official-test evaluation is run once per available checkpoint mode and
-writes `metrics.json`, `metrics.csv`, `confusion_matrix.png`, and
-`evaluation_summary.md` under `results\arwm`. Missing checkpoints are listed as
-unavailable rather than replaced by validation metrics. A small smoke test can be
-run before the full CPU evaluation:
+For isolated 20-epoch Off and Fixed runs, use the dedicated inherited configs.
+They retain the shared FER2013 settings and write to `*_20` checkpoint, log, and
+result directories. The existing Adaptive checkpoint is not used by these runs:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\evaluate_arwm_variants.py --config configs\config_arwm_50.yaml --max-samples 64 --warmup-batches 1 --output results\arwm\smoke
-.\.venv\Scripts\python.exe scripts\evaluate_arwm_variants.py --config configs\config_arwm_50.yaml --off-checkpoint checkpoints\arwm_variants\off\best_model.pth --fixed-checkpoint checkpoints\arwm_variants\fixed\best_model.pth --adaptive-checkpoint checkpoints\arwm_variants\adaptive\best_model.pth --output results\arwm\final
+.\.venv\Scripts\python.exe scripts\train.py --config configs\arwm\off_20.yaml
+.\.venv\Scripts\python.exe scripts\train.py --config configs\arwm\fixed_20.yaml
+```
+
+Each run saves best, latest, and per-epoch checkpoints plus metric history and
+training curves. The `num_epochs: 20` config cap is separate from early stopping;
+the final run summary records the actual completed epoch count.
+
+The official-test evaluator writes `metrics.json`, `metrics.csv`,
+`confusion_matrix.png`, and `evaluation_summary.md` under a new output directory.
+When ARWM weights are available, it also writes `region_weight_samples.csv` and
+`arwm_region_weights.png`; `arwm_comparison.png` is created only when both Off
+and Adaptive have complete official-test results. Existing non-empty output directories are not
+overwritten. Missing checkpoints are listed as unavailable rather than replaced
+by validation metrics. A small smoke test can be run before the full evaluation:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_arwm_variants.py --config configs\config_arwm_50.yaml --adaptive-checkpoint checkpoints\best_model.pth --max-samples 64 --batch-size 1 --warmup-batches 1 --output results\arwm\adaptive_smoke
+.\.venv\Scripts\python.exe scripts\evaluate_arwm_variants.py --config configs\config_arwm_50.yaml --off-checkpoint checkpoints\arwm_variants\off\best_model.pth --fixed-checkpoint checkpoints\arwm_variants\fixed\best_model.pth --adaptive-checkpoint checkpoints\arwm_variants\adaptive\best_model.pth --output results\arwm\final\off_adaptive_eval
 ```
 
 The existing baseline and adaptive checkpoints may be evaluated, but they do not
-by themselves prove a controlled ablation: the fixed-mode checkpoint is not
-available, and legacy checkpoint metadata cannot establish identical training
-conditions. The final command above is for after all three new variants have been
-trained. Results and confidence are not claims about movie-footage accuracy.
+by themselves prove a controlled ablation: a verified Off checkpoint is not
+available, and the legacy adaptive checkpoint lacks metadata to establish
+identical training conditions. The final command above is for after all three
+new variants have been trained. Results and confidence are not claims about
+movie-footage accuracy. Each training run stores its resolved config, hardware
+metadata, and epoch-duration history in its timestamped log directory.
 
 Run multi-face video inference with the existing adaptive checkpoint and display
 the actual sample-dependent region weights:

@@ -1,0 +1,52 @@
+
+FullName                                                                                                                          Length LastWriteTime      
+--------                                                                                                                          ------ -------------      
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\best_model.pth                                 1120763049 19-10-2026 23:43:59
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\best_model_before_50epochs.pth                 1120763049 19-10-2026 23:49:33
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\best_model.pth          1116069459 20-10-2026 21:59:50
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch001.pth  421891235 20-10-2026 18:07:08
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch002.pth  421891235 20-10-2026 18:15:24
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch003.pth  421891235 20-10-2026 18:28:10
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch004.pth 1116081988 20-10-2026 18:54:11
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch005.pth 1116081988 20-10-2026 19:08:10
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch006.pth 1116081988 20-10-2026 19:22:08
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch007.pth 1116081988 20-10-2026 19:36:00
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch008.pth 1116081988 20-10-2026 19:49:56
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch009.pth 1116081988 20-10-2026 20:03:41
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch010.pth 1116081988 20-10-2026 20:17:36
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch011.pth 1116081988 20-10-2026 20:31:26
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch012.pth 1116081988 20-10-2026 20:45:23
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch013.pth 1116081988 20-10-2026 20:59:20
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch014.pth 1116081988 20-10-2026 21:13:15
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch015.pth 1116081988 20-10-2026 21:27:06
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch016.pth 1116081988 20-10-2026 21:40:54
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch017.pth 1116081988 20-10-2026 21:59:46
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch018.pth 1116081988 20-10-2026 22:26:37
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch019.pth 1116081988 20-10-2026 22:44:06
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\checkpoint_epoch020.pth 1116081988 20-10-2026 22:58:02
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\fixed_20\latest_model.pth        1116072229 20-10-2026 22:58:00
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\best_model.pth            1103444211 20-10-2026 17:03:52
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch001.pth    409265859 20-10-2026 13:31:37
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch002.pth    409265859 20-10-2026 13:37:32
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch003.pth    409265859 20-10-2026 13:44:37
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch004.pth   1103456660 20-10-2026 13:58:21
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch005.pth   1103456660 20-10-2026 14:15:52
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch006.pth   1103456660 20-10-2026 14:29:57
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch007.pth   1103456660 20-10-2026 14:43:59
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch008.pth   1103456660 20-10-2026 14:58:04
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch009.pth   1103456660 20-10-2026 15:12:18
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch010.pth   1103456660 20-10-2026 15:26:05
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch011.pth   1103456660 20-10-2026 15:39:56
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch012.pth   1103456660 20-10-2026 15:59:10
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch013.pth   1103456660 20-10-2026 16:22:26
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch014.pth   1103456660 20-10-2026 16:36:09
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch015.pth   1103456660 20-10-2026 16:49:58
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch016.pth   1103456660 20-10-2026 17:03:50
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch017.pth   1103456660 20-10-2026 17:17:43
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch018.pth   1103456660 20-10-2026 17:31:43
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch019.pth   1103456660 20-10-2026 17:45:49
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\checkpoint_epoch020.pth   1103456660 20-10-2026 17:59:43
+C:\Users\vedag\OneDrive\Desktop\EmotionRecognition-StressInference\checkpoints\arwm_variants\off_20\latest_model.pth          1103446949 20-10-2026 17:59:41
+
+
+

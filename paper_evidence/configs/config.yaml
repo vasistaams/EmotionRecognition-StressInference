@@ -1,0 +1,205 @@
+# =============================================================================
+# Configuration for Swin-FANE + BiLSTM-ResNet Framework
+# Paper: "A Two-Phase Swin-FANE and BiLSTM-ResNet Framework for
+#         Emotion Recognition and Temporal Stress Estimation"
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Dataset configuration
+# ---------------------------------------------------------------------------
+dataset:
+  name: "FER2013"                     # Dataset name: "FANE" or "FER2013"
+  root: "data/FER2013"                # Path to dataset root directory
+  image_size: 160                     # Input image resolution (H = W)
+  num_classes: 7                      # Number of emotion categories
+  class_names:                        # Emotion class labels (order matters)
+    - "anger"
+    - "disgust"
+    - "fear"
+    - "happiness"
+    - "sadness"
+    - "surprise"
+    - "neutral"
+
+  # Negative emotion indices for stress formulation (anger, disgust, fear, sadness)
+  negative_emotion_indices: [0, 1, 2, 4]
+
+  # Train / validation / test split ratio
+  split_ratios: [0.70, 0.15, 0.15]
+
+  # Subject-independent split: ensure no subject appears in multiple splits
+  subject_independent: true
+
+  # Temporal sequence settings
+  sequence_length: 16                 # Number of consecutive frames per sequence
+  frame_stride: 1                     # Stride between frames in a sequence
+
+# ---------------------------------------------------------------------------
+# Data augmentation
+# ---------------------------------------------------------------------------
+augmentation:
+  train:
+    horizontal_flip: true
+    random_crop: true
+    color_jitter:
+      brightness: 0.3
+      contrast: 0.3
+      saturation: 0.2
+      hue: 0.1
+    rotation_degrees: 15              # ±15 degrees as specified in paper
+    gaussian_blur: true
+    blur_kernel_size: 5
+  val:
+    horizontal_flip: false
+    random_crop: false
+  test:
+    horizontal_flip: false
+    random_crop: false
+
+# ---------------------------------------------------------------------------
+# Model architecture
+# ---------------------------------------------------------------------------
+model:
+  # Swin Transformer backbone
+  swin:
+    variant: "swin_base_patch4_window7_224"   # timm model name
+    input_size: 160                            # Must match dataset.image_size
+    pretrained: true                          # Use ImageNet pretrained weights
+    pretrained_source: "imagenet"
+    window_size: 7                            # Shifted window size M
+    embed_dim: 128                            # Base embedding dimension
+    depths: [2, 2, 18, 2]                     # Transformer depth per stage
+    num_heads: [4, 8, 16, 32]                 # Attention heads per stage
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.2
+
+  # Adaptive Region Weighting Module (ARWM)
+  region_attention:
+    enabled: false                    # Default: keep baseline path unchanged
+    hidden_dim: 128
+    fusion_weight: 0.3
+    fallback_to_global: true
+    checkpoint_dir: "checkpoints/fer2013_arwm"
+
+  # FANE (Facial Attention Network Embedding) module
+  fane:
+    enabled: true                     # Enable region-aware attention
+    hidden_dim: 256                   # Intermediate projection dimension W1
+    use_mask_guidance: true           # Use dataset mask annotations if available
+    residual_weight: 1.0              # Weight of residual attention path
+
+  # Frame-level classifier head
+  classifier:
+    embedding_dim: 1024               # Dimension of frame embedding z_t
+    dropout: 0.3
+    num_classes: 7
+
+  # BiLSTM temporal module
+  bilstm:
+    input_dim: 1024                   # Must match classifier.embedding_dim
+    hidden_dim: 512                   # BiLSTM hidden state size
+    num_layers: 2                     # Number of stacked BiLSTM layers
+    dropout: 0.3
+    bidirectional: true
+
+  # Residual temporal refinement (1D convolution)
+  residual_refinement:
+    enabled: true
+    kernel_size: 3
+    padding: 1
+
+  # Stress score output projection
+  stress_head:
+    hidden_dim: 256
+    output_dim: 1                     # Scalar stress score
+
+# ---------------------------------------------------------------------------
+# Stress index formulation (deterministic, no labels needed)
+# ---------------------------------------------------------------------------
+stress:
+  alpha: 0.7                          # Weight for sustained negative affect
+  beta: 0.3                           # Weight for emotional volatility
+  # Sensitivity analysis range (used in run_ablation.py)
+  alpha_range: [0.5, 0.6, 0.7, 0.8]
+  # Pseudo-label threshold for ROC evaluation
+  high_stress_threshold: 0.5
+
+# ---------------------------------------------------------------------------
+# Training configuration
+# ---------------------------------------------------------------------------
+training:
+  # Optimiser
+  optimizer: "AdamW"
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+
+  # Learning rate scheduler
+  scheduler: "StepLR"                 # Options: StepLR, CosineAnnealingLR
+  step_size: 15
+  gamma: 0.5
+  cosine_t_max: 50
+
+  # Training loop
+  batch_size: 32
+  num_epochs: 5
+  num_workers: 0                    # Safer/faster for Windows CPU training
+  pin_memory: false                 # No benefit without CUDA
+  freeze_backbone_epochs: 3         # Train FANE and classifier before Swin
+
+  # Regularisation
+  early_stopping_patience: 8         # Stop if val loss doesn't improve
+  gradient_clip_norm: 1.0
+
+  # Loss function
+  loss: "CrossEntropyLoss"
+  class_weighted_loss: true          # Inverse-frequency weights for FER2013
+  label_smoothing: 0.1               # Label smoothing for generalisation
+
+  # Reproducibility
+  seed: 42
+  num_runs: 3                        # Number of independent runs (report mean)
+
+# ---------------------------------------------------------------------------
+# Evaluation configuration
+# ---------------------------------------------------------------------------
+evaluation:
+  # Frame-level metrics
+  compute_confusion_matrix: true
+  compute_roc_auc: true
+  compute_balanced_accuracy: true
+
+  # Temporal metrics
+  compute_etsi: true                  # Emotion Transition Stability Index
+  compute_tve: true                   # Temporal Variance of Embedding
+  compute_scs: true                   # Sequence Consistency Score
+  compute_tce: true                   # Temporal Confusion Entropy
+  compute_scsi: true                  # Stress Curve Smoothness Index
+
+  # Robustness evaluation
+  robustness:
+    occlusion_levels: [0.1, 0.2, 0.3, 0.4]   # Fraction of face occluded
+    blur_sigmas: [1.0, 2.0, 3.0]             # Gaussian blur sigma values
+    brightness_factors: [0.3, 0.5, 0.7]      # Low-light factors
+    frame_drop_rates: [0.1, 0.2, 0.3, 0.4]  # Frame drop for sequence robustness
+
+# ---------------------------------------------------------------------------
+# Output paths
+# ---------------------------------------------------------------------------
+paths:
+  checkpoint_dir: "checkpoints/fer2013_weighted_freeze3_lr1e4"
+  arwm_checkpoint_dir: "checkpoints/fer2013_arwm"
+  arwm_log_dir: "logs/fer2013_arwm"
+  results_dir: "results"
+  log_dir: "logs"
+  best_model: "checkpoints/fer2013_weighted_freeze3_lr1e4/best_model.pth"
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  use_tensorboard: true
+  use_wandb: false
+  wandb_project: "swin-fane-stress"
+  log_interval: 10                   # Log every N batches

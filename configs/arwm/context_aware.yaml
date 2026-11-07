@@ -1,0 +1,26 @@
+base_config: ../config_arwm_50.yaml
+dataset:
+  image_size: 160
+model:
+  swin:
+    input_size: 160
+    pretrained: false
+  region_attention:
+    mode: context_aware
+    enabled: true
+    hidden_dim: 128
+    fusion_weight: 0.3
+    fallback_to_global: true
+training:
+  seed: 42
+  num_runs: 1
+  num_epochs: 20
+  batch_size: 8
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  mixed_precision: true
+  save_epoch_checkpoints: false
+paths:
+  checkpoint_dir: checkpoints/context_aware_arwm
+  log_dir: logs/context_aware_arwm
+  results_dir: results/arwm/context_aware

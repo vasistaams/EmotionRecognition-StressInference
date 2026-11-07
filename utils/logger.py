@@ -107,6 +107,7 @@ class TrainingLogger:
         # ---- Metric history (persisted to JSON) ----
         self.metric_history: Dict[str, list] = {}
         self.best_val_acc    = 0.0
+        self.best_val_loss   = float('inf')
         self.best_epoch      = 0
 
         self.info(f"Logger initialised. Run directory: {self.run_dir}")
@@ -125,6 +126,7 @@ class TrainingLogger:
         train_metrics: Dict[str, float],
         val_metrics: Dict[str, float],
         lr: float,
+        epoch_duration_seconds: Optional[float] = None,
     ):
         """
         Logs metrics for one training epoch.
@@ -135,22 +137,38 @@ class TrainingLogger:
             val_metrics:   Validation metrics dict.
             lr:            Current learning rate.
         """
-        # Console output
-        self.info(
-            f"Epoch {epoch:3d} | "
-            f"Train Loss: {train_metrics.get('mean_loss', 0):.4f} | "
-            f"Train Acc:  {train_metrics.get('accuracy', 0):.2f}% | "
-            f"Val Acc:    {val_metrics.get('accuracy', 0):.2f}% | "
-            f"Val F1:     {val_metrics.get('f1', 0):.2f}% | "
-            f"LR: {lr:.2e}"
-        )
-
         # Track best model
         val_acc = val_metrics.get('accuracy', 0.0)
         if val_acc > self.best_val_acc:
             self.best_val_acc = val_acc
+            self.best_val_loss = val_metrics.get('mean_loss', float('inf'))
             self.best_epoch   = epoch
             self.info(f"  New best validation accuracy: {val_acc:.2f}% at epoch {epoch}")
+
+        # Console output includes the epoch metrics and current best selection.
+        self.info(
+            f"Epoch {epoch:3d} | "
+            f"Train loss/acc/bAcc/P/R/F1: "
+            f"{train_metrics.get('mean_loss', 0):.4f}/"
+            f"{train_metrics.get('accuracy', 0):.2f}/"
+            f"{train_metrics.get('balanced_accuracy', 0) * 100:.2f}/"
+            f"{train_metrics.get('precision', 0):.2f}/"
+            f"{train_metrics.get('recall', 0):.2f}/"
+            f"{train_metrics.get('f1', 0):.2f}% | "
+            f"Val loss/acc/bAcc/P/R/F1: "
+            f"{val_metrics.get('mean_loss', 0):.4f}/"
+            f"{val_metrics.get('accuracy', 0):.2f}/"
+            f"{val_metrics.get('balanced_accuracy', 0) * 100:.2f}/"
+            f"{val_metrics.get('precision', 0):.2f}/"
+            f"{val_metrics.get('recall', 0):.2f}/"
+            f"{val_metrics.get('f1', 0):.2f}% | "
+            f"LR: {lr:.2e} | "
+            f"Best val acc: {self.best_val_acc:.2f}% @ epoch {self.best_epoch}"
+            + (
+                f" | Duration: {epoch_duration_seconds:.1f}s"
+                if epoch_duration_seconds is not None else ""
+            )
+        )
 
         # TensorBoard logging
         if self.tb_writer:
@@ -159,6 +177,10 @@ class TrainingLogger:
             for key, val in val_metrics.items():
                 self.tb_writer.add_scalar(f'Val/{key}', val, epoch)
             self.tb_writer.add_scalar('LR/lr', lr, epoch)
+            if epoch_duration_seconds is not None:
+                self.tb_writer.add_scalar(
+                    'Time/epoch_seconds', epoch_duration_seconds, epoch
+                )
 
         # W&B logging
         if self.wandb_run:
@@ -166,6 +188,8 @@ class TrainingLogger:
             log_dict.update({f'val_{k}': v for k, v in val_metrics.items()})
             log_dict['lr'] = lr
             log_dict['epoch'] = epoch
+            if epoch_duration_seconds is not None:
+                log_dict['epoch_duration_seconds'] = epoch_duration_seconds
             self.wandb_run.log(log_dict)
 
         # Persist to history
@@ -174,6 +198,10 @@ class TrainingLogger:
         for key, val in val_metrics.items():
             self.metric_history.setdefault(f'val_{key}', []).append(val)
         self.metric_history.setdefault('lr', []).append(lr)
+        if epoch_duration_seconds is not None:
+            self.metric_history.setdefault(
+                'epoch_duration_seconds', []
+            ).append(epoch_duration_seconds)
 
     def log_test_results(self, test_metrics: Dict[str, Any]):
         """
@@ -204,6 +232,53 @@ class TrainingLogger:
         history_path = self.run_dir / "metric_history.json"
         with open(history_path, 'w') as f:
             json.dump(self.metric_history, f, indent=2)
+        self.save_training_curves()
+
+    def save_training_curves(self):
+        """Plot the loss, accuracy, macro-F1, and learning-rate history."""
+        metric_groups = (
+            ("mean_loss", "Loss"),
+            ("accuracy", "Accuracy (%)"),
+            ("f1", "Macro F1 (%)"),
+            ("lr", "Learning rate"),
+        )
+        if not any(
+            f"train_{key}" in self.metric_history
+            or f"val_{key}" in self.metric_history
+            for key, _ in metric_groups
+        ):
+            return
+
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        figure, axes = plt.subplots(2, 2, figsize=(12, 8))
+        for axis, (key, label) in zip(axes.flat, metric_groups):
+            if key == "lr":
+                values = self.metric_history.get("lr", [])
+                if values:
+                    axis.plot(range(1, len(values) + 1), values, label=label)
+            else:
+                for prefix, series_label in (
+                    ("train_", "Train"),
+                    ("val_", "Validation"),
+                ):
+                    values = self.metric_history.get(f"{prefix}{key}", [])
+                    if values:
+                        axis.plot(
+                            range(1, len(values) + 1),
+                            values,
+                            label=series_label,
+                        )
+            axis.set_xlabel("Epoch")
+            axis.set_ylabel(label)
+            axis.grid(True, alpha=0.25)
+            if axis.lines:
+                axis.legend()
+        figure.tight_layout()
+        figure.savefig(self.run_dir / "training_curves.png", dpi=150)
+        plt.close(figure)
 
     # ------------------------------------------------------------------
     # Checkpoint management
@@ -219,6 +294,7 @@ class TrainingLogger:
         is_best: bool = False,
         metadata: Optional[Dict[str, object]] = None,
         scheduler=None,
+        scaler=None,
         save_epoch_checkpoint: bool = True,
     ):
         """
@@ -234,6 +310,7 @@ class TrainingLogger:
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
 
+        numpy_rng_state = np.random.get_state()
         state = {
             'epoch':     epoch,
             'model':     model.state_dict(),
@@ -241,13 +318,21 @@ class TrainingLogger:
             'metrics':   metrics,
             'rng_state': {
                 'python': random.getstate(),
-                'numpy': np.random.get_state(),
+                'numpy': {
+                    'bit_generator': numpy_rng_state[0],
+                    'state': numpy_rng_state[1].tolist(),
+                    'position': int(numpy_rng_state[2]),
+                    'has_gauss': int(numpy_rng_state[3]),
+                    'cached_gaussian': float(numpy_rng_state[4]),
+                },
                 'torch': torch.get_rng_state(),
                 'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             },
         }
         if scheduler is not None:
             state['scheduler'] = scheduler.state_dict()
+        if scaler is not None and scaler.is_enabled():
+            state['scaler'] = scaler.state_dict()
         if metadata is not None:
             state['experiment'] = metadata
 

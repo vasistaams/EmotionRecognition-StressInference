@@ -1,0 +1,7 @@
+﻿{
+    "timestamp_local":  "2026-11-07T12:41:48.6686837+05:30",
+    "query":  "nvidia-smi --query-gpu=name,pstate,clocks.current.sm,power.draw,temperature.gpu,utilization.gpu --format=csv,noheader",
+    "gpu_query":  "NVIDIA GeForce RTX 3050 6GB Laptop GPU, P8, 210 MHz, 4.24 W, 43, 0 %",
+    "powercfg_query":  "powercfg /GETACTIVESCHEME",
+    "active_power_scheme":  "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)"
+}

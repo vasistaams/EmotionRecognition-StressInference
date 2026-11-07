@@ -55,6 +55,11 @@ from utils.face_inference import (
 )
 from utils.checkpointing import validate_checkpoint_region_mode
 from utils.configuration import get_region_attention_mode, load_config, set_region_attention_mode
+from utils.video_analysis import (
+    reconstruct_temporal_analysis,
+    write_empty_temporal_plots,
+    write_temporal_plots,
+)
 
 
 # Emotion label colours for annotation overlay
@@ -67,6 +72,213 @@ EMOTION_COLOURS_BGR = {
     'surprise': (50, 150, 200),
     'neutral':  (100,100, 100),
 }
+
+DASHBOARD_HEIGHT = 150
+VIDEO_FOOTER_HEIGHT = 42
+
+
+def draw_video_dashboard(
+    frame_bgr: np.ndarray,
+    snapshot: dict = None,
+    elapsed_seconds: float = 0.0,
+    fps: float = 0.0,
+) -> np.ndarray:
+    """Add a data-backed black dashboard and stress-proxy bar without resizing video."""
+    height, width = frame_bgr.shape[:2]
+    canvas = np.zeros(
+        (height + DASHBOARD_HEIGHT + VIDEO_FOOTER_HEIGHT, width, 3),
+        dtype=np.uint8,
+    )
+    canvas[DASHBOARD_HEIGHT:DASHBOARD_HEIGHT + height] = frame_bgr
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = max(0.45, min(0.72, width / 1500.0))
+    line = max(20, int(29 * scale / 0.72))
+    left = max(12, int(width * 0.018))
+    color = (210, 210, 210)
+    if snapshot is None:
+        title = "Waiting for a face prediction"
+        cv2.putText(canvas, title, (left, 32), font, scale * 1.1, color, 2, cv2.LINE_AA)
+        cv2.putText(
+            canvas,
+            f"Video time: {elapsed_seconds:.1f}s | {fps:.2f} FPS",
+            (left, 32 + line),
+            font,
+            scale,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+        stress_proxy = None
+    else:
+        emotion = snapshot["emotion"]
+        emotion_color = EMOTION_COLOURS_BGR.get(emotion, color)
+        cv2.putText(
+            canvas,
+            emotion.upper(),
+            (left, 34),
+            font,
+            scale * 1.15,
+            emotion_color,
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas,
+            f"Confidence: {snapshot['confidence']:.1%}   Track: {snapshot['track_id']}",
+            (left, 34 + line),
+            font,
+            scale,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas,
+            f"Transition: {snapshot['last_transition']}",
+            (left, 34 + 2 * line),
+            font,
+            scale,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas,
+            (
+                f"Transitions: {snapshot['transition_count']}   "
+                f"Persistence: {snapshot['persistence_seconds']:.1f}s   "
+                f"Volatility (last 16 predictions): "
+                f"{snapshot['probability_volatility_16']:.3f}"
+            ),
+            (left, 34 + 3 * line),
+            font,
+            scale * 0.9,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas,
+            (
+                f"Negative affect: {snapshot['negative_affect']:.3f}   "
+                f"Stress proxy: {snapshot['stress_proxy']:.3f} / 1.000   "
+                f"Video time: {elapsed_seconds:.1f}s"
+            ),
+            (left, 34 + 4 * line),
+            font,
+            scale * 0.9,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+        stress_proxy = snapshot["stress_proxy"]
+
+    footer_y = DASHBOARD_HEIGHT + height
+    cv2.putText(
+        canvas,
+        "Calculated stress proxy (not validated stress)",
+        (left, footer_y + 27),
+        font,
+        scale * 0.72,
+        color,
+        1,
+        cv2.LINE_AA,
+    )
+    bar_left = min(width - 24, left + max(235, int(width * 0.37)))
+    bar_right = max(bar_left + 1, width - left)
+    bar_top = footer_y + 12
+    bar_bottom = footer_y + 29
+    cv2.rectangle(canvas, (bar_left, bar_top), (bar_right, bar_bottom), (90, 90, 90), 1)
+    if stress_proxy is not None:
+        fill_right = bar_left + int((bar_right - bar_left) * np.clip(stress_proxy, 0.0, 1.0))
+        cv2.rectangle(
+            canvas,
+            (bar_left + 1, bar_top + 1),
+            (max(bar_left + 1, fill_right - 1), bar_bottom - 1),
+            (40, 150, 230),
+            cv2.FILLED,
+        )
+    return canvas
+
+
+def validate_required_video_artifacts(
+    output_dir: Path,
+    expected_width: int,
+    expected_height: int,
+) -> dict:
+    """Verify required image/video files decode and results JSON is consistent."""
+    required = (
+        "annotated_video.mp4",
+        "emotion_timeline.png",
+        "stress_trajectory.png",
+        "temporal_analysis.png",
+        "results.json",
+    )
+    for filename in required:
+        path = output_dir / filename
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RuntimeError(
+                f"Required video inference artifact is missing or empty: {path}"
+            )
+
+    for filename in required[1:4]:
+        path = output_dir / filename
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            raise RuntimeError(f"Required plot is unreadable: {path}")
+
+    video_path = output_dir / "annotated_video.mp4"
+    video = cv2.VideoCapture(str(video_path))
+    try:
+        if not video.isOpened():
+            raise RuntimeError(f"Required annotated video is unreadable: {video_path}")
+        ok, first_frame = video.read()
+        if not ok or first_frame is None:
+            raise RuntimeError(
+                f"Required annotated video has no readable frames: {video_path}"
+            )
+        actual_dimensions = (first_frame.shape[1], first_frame.shape[0])
+        required_dimensions = (
+            expected_width,
+            expected_height + DASHBOARD_HEIGHT + VIDEO_FOOTER_HEIGHT,
+        )
+        if actual_dimensions != required_dimensions:
+            raise RuntimeError(
+                f"Annotated video dimensions are {actual_dimensions}; expected "
+                f"{required_dimensions}: {video_path}"
+            )
+    finally:
+        video.release()
+
+    results_path = output_dir / "results.json"
+    try:
+        with results_path.open(encoding="utf-8") as result_file:
+            results = json.load(result_file)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"Required results JSON is unreadable: {results_path}: {error}"
+        ) from error
+    frames = results.get("frames")
+    if not isinstance(frames, list) or len(frames) != results["input"]["source_frame_count"]:
+        raise RuntimeError(
+            "results.json frame records do not match the source frame count."
+        )
+    timestamps = [float(frame["timestamp_seconds"]) for frame in frames]
+    if any(
+        not np.isfinite(timestamp)
+        for timestamp in timestamps
+    ) or any(right < left for left, right in zip(timestamps, timestamps[1:])):
+        raise RuntimeError("results.json frame timestamps are invalid or unordered.")
+    prediction_count = sum(len(frame.get("faces", [])) for frame in frames)
+    if prediction_count != results["prediction_diagnostics"]["predicted_face_count"]:
+        raise RuntimeError(
+            "results.json prediction count does not match its frame records."
+        )
+    for value in results.get("stress_trajectory", {}).get("stress_proxy", []):
+        if not np.isfinite(float(value)):
+            raise RuntimeError("results.json contains an invalid stress-proxy value.")
+    return results
 
 
 @torch.inference_mode()
@@ -84,6 +296,12 @@ def infer_video(
     annotate_video: bool = True,
     write_diagnostics: bool = True,
     show_region_weights: bool = False,
+    temporal_analysis: bool = False,
+    alpha: float = 0.7,
+    beta: float = 0.3,
+    config_path: str = None,
+    checkpoint_report: dict = None,
+    timing_collector: dict = None,
 ) -> dict:
     """Run face-crop inference and save a per-frame diagnostic package."""
     if frame_stride < 1:
@@ -94,13 +312,33 @@ def infer_video(
         raise ValueError(f"Unknown face mode: {face_mode}")
     if face_index < 0:
         raise ValueError("face_index must be non-negative")
+    if not annotate_video:
+        raise ValueError(
+            "A complete video run must write annotated_video.mp4; "
+            "--no-annotate is not supported."
+        )
     if not video_dataset.MTCNN_AVAILABLE:
         raise ImportError(
             "facenet-pytorch is required for video face detection. "
             "Install it with: pip install facenet-pytorch"
         )
 
-    os.makedirs(output_dir, exist_ok=True)
+    video_file = Path(video_path)
+    if not video_file.is_file():
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+    output_path = Path(output_dir)
+    if output_path.exists():
+        if not output_path.is_dir():
+            raise NotADirectoryError(f"Output path is not a directory: {output_dir}")
+        existing_files = {
+            item.name for item in output_path.iterdir()
+        } - {"checkpoint_load.json"}
+        if existing_files:
+            raise FileExistsError(
+                f"Output directory contains existing results: {output_dir}. "
+                "Choose a new output directory to preserve them."
+            )
+    output_path.mkdir(parents=True, exist_ok=True)
     sample_dir = os.path.join(output_dir, "annotated_samples")
     if write_diagnostics:
         os.makedirs(sample_dir, exist_ok=True)
@@ -114,24 +352,33 @@ def infer_video(
     tracker = FaceTracker(max_gap=max(3, frame_stride * 3))
     model.eval()
 
-    cap = cv2.VideoCapture(str(video_path))
+    cap = cv2.VideoCapture(str(video_file))
     if not cap.isOpened():
         raise IOError(f"Cannot open video: {video_path}")
     fps = float(cap.get(cv2.CAP_PROP_FPS))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total_frames == 0:
+        cap.release()
+        raise ValueError(f"Video contains no readable frames: {video_path}")
+    if not np.isfinite(fps) or fps < 0:
+        cap.release()
+        raise ValueError(f"Video reports an invalid frame rate: {fps}")
+    effective_fps = fps if fps > 0 else 25.0
     output_video = None
-    if annotate_video:
-        output_video = cv2.VideoWriter(
-            os.path.join(output_dir, "annotated_video.mp4"),
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            fps if fps > 0 else 25.0,
-            (width, height),
+    output_video = cv2.VideoWriter(
+        os.path.join(output_dir, "annotated_video.mp4"),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps if fps > 0 else 25.0,
+        (width, height + DASHBOARD_HEIGHT + VIDEO_FOOTER_HEIGHT),
+    )
+    if not output_video.isOpened():
+        cap.release()
+        raise IOError(
+            f"Cannot create required annotated video: "
+            f"{output_path / 'annotated_video.mp4'}"
         )
-        if not output_video.isOpened():
-            cap.release()
-            raise IOError("Cannot create annotated_video.mp4")
 
     records = []
     csv_rows = []
@@ -139,11 +386,19 @@ def infer_video(
     confidences_by_track = defaultdict(list)
     probabilities_by_track = defaultdict(list)
     region_weights_by_track = defaultdict(list)
+    temporal_trackers = {}
+    temporal_records_by_track = defaultdict(list)
+    recent_probabilities_by_track = defaultdict(list)
+    dashboard_snapshot = None
     detected_frames = 0
     no_face_frames = 0
     processed_frames = 0
     frame_index = 0
     sample_saved = False
+    if timing_collector is not None:
+        timing_collector.clear()
+        timing_collector["per_frame"] = []
+        timing_collector["cuda_synchronized"] = device.type == "cuda"
 
     print(
         f"[InferVideo] {Path(video_path).name}: {width}x{height}, "
@@ -152,10 +407,37 @@ def infer_video(
     )
     try:
         while True:
+            frame_start = (
+                time.perf_counter() if timing_collector is not None else None
+            )
+            decode_start = (
+                time.perf_counter() if timing_collector is not None else None
+            )
             ok, frame_bgr = cap.read()
             if not ok:
                 break
-            timestamp = frame_index / fps if fps > 0 else 0.0
+            frame_timing = None
+            if timing_collector is not None:
+                frame_timing = {
+                    "frame_index": frame_index,
+                    "processed": frame_index % frame_stride == 0,
+                    "detected_face_count": None,
+                    "selected_face_count": None,
+                    "decode_time_ms": (
+                        time.perf_counter() - decode_start
+                    ) * 1000.0,
+                    "face_detection_time_ms": None,
+                    "preprocessing_time_ms": None,
+                    "model_forward_time_ms": None,
+                    "prediction_postprocessing_time_ms": None,
+                    "annotation_dashboard_time_ms": None,
+                    "video_write_time_ms": None,
+                    "sample_write_time_ms": None,
+                }
+            timestamp = frame_index / effective_fps
+            annotation_start = (
+                time.perf_counter() if timing_collector is not None else None
+            )
             annotated = frame_bgr.copy()
 
             if frame_index % frame_stride:
@@ -167,13 +449,23 @@ def infer_video(
                 }
             else:
                 processed_frames += 1
+                detection_start = (
+                    time.perf_counter() if timing_collector is not None else None
+                )
                 faces = detect_faces(
                     frame_bgr,
                     detector,
                     max_side=detection_max_side,
                 )
+                if frame_timing is not None:
+                    frame_timing["face_detection_time_ms"] = (
+                        time.perf_counter() - detection_start
+                    ) * 1000.0
+                    frame_timing["detected_face_count"] = len(faces)
                 tracker.update(faces, frame_index)
                 selected = select_faces(faces, face_mode, face_index)
+                if frame_timing is not None:
+                    frame_timing["selected_face_count"] = len(selected)
                 if faces:
                     detected_frames += 1
                     status = "detected"
@@ -183,12 +475,22 @@ def infer_video(
 
                 predictions = []
                 if selected:
+                    preprocessing_start = (
+                        time.perf_counter()
+                        if timing_collector is not None else None
+                    )
                     face_tensors = torch.stack([
                         preprocess_face(
                             frame_bgr, face["bbox"], transform, image_size
                         )
                         for face in selected
                     ]).to(device)
+                    if timing_collector is not None and device.type == "cuda":
+                        torch.cuda.synchronize(device)
+                    if frame_timing is not None:
+                        frame_timing["preprocessing_time_ms"] = (
+                            time.perf_counter() - preprocessing_start
+                        ) * 1000.0
                     if device.type == "cuda":
                         torch.cuda.synchronize(device)
                     model_start = time.perf_counter()
@@ -200,6 +502,14 @@ def infer_video(
                     ) * 1000.0
                     model_time_per_face_ms = (
                         model_batch_time_ms / len(selected)
+                    )
+                    if frame_timing is not None:
+                        frame_timing["model_forward_time_ms"] = (
+                            model_batch_time_ms
+                        )
+                    postprocessing_start = (
+                        time.perf_counter()
+                        if timing_collector is not None else None
                     )
                     probs_batch = output["probs"].detach().cpu().numpy()
                     region_weights = output.get("region_weights")
@@ -213,6 +523,37 @@ def infer_video(
                         emotion_index = int(top_indices[0])
                         emotion = EMOTION_CLASSES[emotion_index]
                         confidence = float(probabilities[emotion_index])
+                        track_id = int(face["track_id"])
+                        temporal_tracker = temporal_trackers.setdefault(
+                            track_id,
+                            TemporalSignalTracker(alpha=alpha, beta=beta),
+                        )
+                        temporal_record = temporal_tracker.update(
+                            probabilities, timestamp
+                        )
+                        temporal_records_by_track[track_id].append(temporal_record)
+                        recent_probabilities = recent_probabilities_by_track[track_id]
+                        recent_probabilities.append(
+                            probabilities.astype(float).tolist()
+                        )
+                        del recent_probabilities[:-16]
+                        recent_changes = [
+                            0.5 * np.abs(
+                                np.asarray(current) - np.asarray(previous)
+                            ).sum()
+                            for previous, current in zip(
+                                recent_probabilities,
+                                recent_probabilities[1:],
+                            )
+                        ]
+                        probability_volatility_16 = (
+                            float(np.mean(recent_changes))
+                            if recent_changes else 0.0
+                        )
+                        transition_count = sum(
+                            item["transition"] is not None
+                            for item in temporal_records_by_track[track_id]
+                        )
                         region_log = region_weight_log_record(
                             model.spatial_encoder.region_attention_mode,
                             (
@@ -221,7 +562,7 @@ def infer_video(
                             ),
                         )
                         face_record = {
-                            "track_id": int(face["track_id"]),
+                            "track_id": track_id,
                             "bbox_xyxy": [int(value) for value in face["bbox"]],
                             "frame_index": frame_index,
                             "timestamp_seconds": timestamp,
@@ -246,6 +587,21 @@ def infer_video(
                                     EMOTION_CLASSES
                                 )
                             },
+                            "temporal_metrics": {
+                                "transition": temporal_record["transition"],
+                                "last_transition": temporal_record["last_transition"],
+                                "transition_count": transition_count,
+                                "persistence_seconds": temporal_record[
+                                    "persistence_seconds"
+                                ],
+                                "probability_volatility_16": (
+                                    probability_volatility_16
+                                ),
+                                "negative_affect": temporal_record[
+                                    "negative_affect"
+                                ],
+                                "stress_proxy": temporal_record["stress_proxy"],
+                            },
                         }
                         predictions.append(face_record)
                         labels_by_track[face["track_id"]].append(emotion)
@@ -257,6 +613,26 @@ def infer_video(
                             region_weights_by_track[face["track_id"]].append(
                                 region_weights[face_number].astype(float).tolist()
                             )
+                        if face_number == 0:
+                            dashboard_snapshot = {
+                                "track_id": track_id,
+                                "emotion": emotion,
+                                "confidence": confidence,
+                                "last_transition": temporal_record[
+                                    "last_transition"
+                                ],
+                                "transition_count": transition_count,
+                                "persistence_seconds": temporal_record[
+                                    "persistence_seconds"
+                                ],
+                                "probability_volatility_16": (
+                                    probability_volatility_16
+                                ),
+                                "negative_affect": temporal_record[
+                                    "negative_affect"
+                                ],
+                                "stress_proxy": temporal_record["stress_proxy"],
+                            }
                         csv_rows.append({
                             "frame_index": frame_index,
                             "timestamp_seconds": f"{timestamp:.6f}",
@@ -311,6 +687,10 @@ def infer_video(
                             (40, 220, 40),
                             2,
                         )
+                    if frame_timing is not None:
+                        frame_timing["prediction_postprocessing_time_ms"] = (
+                            time.perf_counter() - postprocessing_start
+                        ) * 1000.0
                 elif faces and face_mode == "selected":
                     status = "selected_face_not_found"
 
@@ -333,7 +713,23 @@ def infer_video(
 
             records.append(frame_record)
             if output_video is not None:
-                output_video.write(annotated)
+                elapsed_seconds = frame_index / effective_fps
+                dashboard_frame = draw_video_dashboard(
+                    annotated,
+                    dashboard_snapshot,
+                    elapsed_seconds=elapsed_seconds,
+                    fps=effective_fps,
+                )
+                if frame_timing is not None:
+                    frame_timing["annotation_dashboard_time_ms"] = (
+                        time.perf_counter() - annotation_start
+                    ) * 1000.0
+                    video_write_start = time.perf_counter()
+                output_video.write(dashboard_frame)
+                if frame_timing is not None:
+                    frame_timing["video_write_time_ms"] = (
+                        time.perf_counter() - video_write_start
+                    ) * 1000.0
             if write_diagnostics and (
                 frame_index % sample_every == 0
                 or (not sample_saved and frame_record["detection_status"] == "detected")
@@ -341,9 +737,22 @@ def infer_video(
                 sample_path = os.path.join(
                     sample_dir, f"frame_{frame_index:06d}.jpg"
                 )
+                sample_write_start = (
+                    time.perf_counter()
+                    if timing_collector is not None else None
+                )
                 if not cv2.imwrite(sample_path, annotated):
                     raise IOError(f"Could not save annotated sample: {sample_path}")
+                if frame_timing is not None:
+                    frame_timing["sample_write_time_ms"] = (
+                        time.perf_counter() - sample_write_start
+                    ) * 1000.0
                 sample_saved = True
+            if frame_timing is not None:
+                frame_timing["frame_total_time_ms"] = (
+                    time.perf_counter() - frame_start
+                ) * 1000.0
+                timing_collector["per_frame"].append(frame_timing)
             frame_index += 1
     finally:
         cap.release()
@@ -403,6 +812,7 @@ def infer_video(
             "height": height,
             "fps": fps,
             "source_frame_count": total_frames,
+            "duration_seconds": total_frames / effective_fps,
         },
         "inference": {
             "face_mode": face_mode,
@@ -425,6 +835,8 @@ def infer_video(
             "detected_frames": detected_frames,
             "no_face_frames": no_face_frames,
             "skipped_frames": total_frames - processed_frames,
+            "temporal_analysis_enabled": True,
+            "effective_fps_used_for_timestamps": effective_fps,
         },
         "prediction_diagnostics": {
             "predicted_face_count": len(all_labels),
@@ -456,11 +868,123 @@ def infer_video(
         },
         "frames": records,
     }
+    result["configuration"] = {
+        "path": str(Path(config_path).resolve()) if config_path else None,
+        "image_size": image_size,
+        "emotion_class_order": EMOTION_CLASSES,
+        "stress_alpha": alpha,
+        "stress_beta": beta,
+    }
+    if checkpoint_report is not None:
+        result["checkpoint"] = checkpoint_report
+
+    plot_names = []
+    analysis = None
+    primary_track = None
+    if result["prediction_diagnostics"]["predicted_face_count"]:
+        analysis, primary_track = reconstruct_temporal_analysis(
+            result,
+            alpha=alpha,
+            beta=beta,
+        )
+        plot_names = write_temporal_plots(
+            primary_track,
+            analysis,
+            output_dir,
+            include_temporal_plot=True,
+        )
+        primary_track_data = analysis["tracks"][
+            analysis["primary_plot_track_id"]
+        ]
+        stress = primary_track["stress"]
+        result["stress_trajectory"] = {
+            "description": (
+                "Deterministic proxy derived from negative-affect probabilities "
+                "and their temporal change; not a learned or validated stress score."
+            ),
+            "primary_plot_track_id": analysis["primary_plot_track_id"],
+            "timestamps_seconds": primary_track["timestamps"].astype(float).tolist(),
+            "stress_proxy": stress["raw_trajectory"].astype(float).tolist(),
+            "smoothed_stress_proxy": stress["smoothed"].astype(float).tolist(),
+            "negative_affect": stress["r"].astype(float).tolist(),
+            "negative_affect_volatility": stress["v"].astype(float).tolist(),
+        }
+        result["calculated_stress_proxy"] = {
+            "description": (
+                "Deterministic proxy from emotion probabilities; not a validated "
+                "or learned stress prediction."
+            ),
+            "primary_plot_track_id": analysis["primary_plot_track_id"],
+            "tracks": {
+                track_id: {
+                    "mean": summary["stress_proxy_mean"],
+                    "peak": summary["stress_proxy_peak"],
+                }
+                for track_id, summary in analysis["tracks"].items()
+            },
+        }
+        result["temporal_analysis"] = analysis
+    else:
+        no_prediction_reason = (
+            "No face detections produced emotion probabilities in this video."
+        )
+        plot_names = write_empty_temporal_plots(
+            output_dir,
+            no_prediction_reason,
+        )
+        result["visual_diagnostics"] = {
+            "status": "unavailable",
+            "reason": no_prediction_reason,
+            "plots_contain_data": False,
+        }
+        result["temporal_analysis"] = {
+            "status": "unavailable",
+            "reason": no_prediction_reason,
+            "learned_temporal_model_used": False,
+        }
+        result["calculated_stress_proxy"] = {
+            "status": "unavailable",
+            "reason": no_prediction_reason,
+            "learned_stress_prediction": False,
+        }
+
+    result["temporal_model"] = {
+        "learned_temporal_model_used": False,
+        "reason": (
+            "This inference path uses per-frame spatial predictions and computes "
+            "time-based signals from their probabilities. The available training "
+            "loop optimizes forward_frame, so this output does not treat saved "
+            "temporal-head parameters as trained stress predictions."
+        ),
+    }
+    result["artifacts"] = {
+        "annotated_video": str((output_path / "annotated_video.mp4").resolve()),
+        "emotion_timeline": str((output_path / "emotion_timeline.png").resolve()),
+        "stress_trajectory": str((output_path / "stress_trajectory.png").resolve()),
+        "temporal_analysis": str((output_path / "temporal_analysis.png").resolve()),
+        "results_json": str((output_path / "results.json").resolve()),
+        "prediction_count": result["prediction_diagnostics"]["predicted_face_count"],
+        "stress_sample_count": len(
+            result.get("stress_trajectory", {}).get("timestamps_seconds", [])
+        ),
+    }
+    if temporal_analysis:
+        result["temporal_analysis_requested"] = True
+
+    # results.json and the five dashboard files are mandatory even when
+    # ancillary diagnostic logging is disabled.
+    results_json_path = output_path / "results.json"
+    try:
+        with results_json_path.open("w", encoding="utf-8") as result_file:
+            json.dump(result, result_file, indent=2, allow_nan=False)
+    except Exception as error:
+        raise RuntimeError(
+            f"Failed to generate required artifact results.json: {error}"
+        ) from error
+
     if write_diagnostics:
         with open(os.path.join(output_dir, "inference_log.json"), "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2)
-        with open(os.path.join(output_dir, "results.json"), "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2)
+            json.dump(result, f, indent=2, allow_nan=False)
         with open(
             os.path.join(output_dir, "prediction_probabilities.csv"),
             "w",
@@ -501,8 +1025,13 @@ def infer_video(
                     "inference_log.json",
                     "prediction_probabilities.csv",
                     "annotated_samples/",
-                    "annotated_video.mp4" if annotate_video else None,
+                    "annotated_video.mp4",
+                    *plot_names,
+                    "temporal_analysis.json" if plot_names else None,
                 ],
+                "temporal_analysis": result.get("temporal_analysis", {}).get(
+                    "method"
+                ),
                 "classification_accuracy": (
                     "Not measured: this video has no supplied ground-truth labels."
                 ),
@@ -510,7 +1039,19 @@ def infer_video(
                     "If preprocessing and checkpoint loading are correct, FER2013 "
                     "to movie-footage domain shift may still limit classification."
                 ),
-            }, f, indent=2)
+            }, f, indent=2, allow_nan=False)
+        if "temporal_analysis" in result and analysis is not None:
+            with open(
+                os.path.join(output_dir, "temporal_analysis.json"),
+                "w",
+                encoding="utf-8",
+            ) as temporal_file:
+                json.dump(
+                    result["temporal_analysis"],
+                    temporal_file,
+                    indent=2,
+                    allow_nan=False,
+                )
 
     print(
         f"[InferVideo] Processed {processed_frames}/{frame_index} frames; "
@@ -523,8 +1064,21 @@ def infer_video(
             f"confidence={summary['mean_confidence']:.3f}, "
             f"label transitions={summary['label_transition_count']}"
         )
-    print(f"[InferVideo] Diagnostic package: {output_dir}")
-    return result
+    required_artifacts = validate_required_video_artifacts(
+        output_path,
+        width,
+        height,
+    )
+    print("[InferVideo] Required artifacts:")
+    for filename in (
+        "annotated_video.mp4",
+        "emotion_timeline.png",
+        "stress_trajectory.png",
+        "temporal_analysis.png",
+        "results.json",
+    ):
+        print(f"  {output_path / filename}")
+    return required_artifacts
 
 
 @torch.no_grad()
@@ -938,13 +1492,18 @@ if __name__ == '__main__':
     parser.add_argument('--video',       type=str, required=True)
     parser.add_argument('--checkpoint',  type=str, required=True)
     parser.add_argument('--config',      type=str, required=True)
-    parser.add_argument('--output',      type=str, default='results/video_output')
+    parser.add_argument(
+        '--output',
+        type=str,
+        default=None,
+        help='Output directory (default: results/<video-stem>)',
+    )
     parser.add_argument('--no-annotate', action='store_true',
-                        help='Skip writing annotated video')
+                        help='Legacy option; incompatible with required annotated output')
     parser.add_argument('--arwm', action='store_true',
                         help='Legacy alias for --arwm-mode adaptive')
     parser.add_argument(
-        '--arwm-mode', choices=('off', 'fixed', 'adaptive'), default=None,
+        '--arwm-mode', choices=('off', 'fixed', 'adaptive', 'context_aware'), default=None,
         help='Expected trained model mode; must match the checkpoint',
     )
     parser.add_argument(
@@ -975,9 +1534,35 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--no-log', action='store_true',
-        help='Disable JSON/CSV diagnostics and annotated sample image writes',
+        help='Skip ancillary log/CSV/sample files (required results.json is still written)',
+    )
+    parser.add_argument(
+        '--temporal-analysis',
+        action='store_true',
+        help='Legacy opt-in; required temporal plots and analysis are now always included',
     )
     args = parser.parse_args()
+    if args.no_annotate:
+        parser.error(
+            "--no-annotate cannot be used because annotated_video.mp4 is required"
+        )
+    for name, path in (
+        ("video", args.video),
+        ("checkpoint", args.checkpoint),
+        ("configuration", args.config),
+    ):
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"{name.capitalize()} file not found: {path}")
+    output_path = Path(args.output) if args.output else (
+        Path("results") / Path(args.video).stem
+    )
+    if output_path.exists() and (
+        not output_path.is_dir() or any(output_path.iterdir())
+    ):
+        raise FileExistsError(
+            f"Output directory already contains files: {output_path}. "
+            "Choose a fresh output directory to preserve prior results."
+        )
 
     config = load_config(args.config)
     if args.arwm_mode:
@@ -992,7 +1577,7 @@ if __name__ == '__main__':
     config.setdefault('model', {}).setdefault('swin', {})['pretrained'] = False
     model = build_framework(config).to(device)
     checkpoint = torch.load(
-        args.checkpoint, map_location=device, weights_only=False
+        args.checkpoint, map_location="cpu", weights_only=True
     )
     state_dict = checkpoint.get('model') if isinstance(checkpoint, dict) else None
     if not isinstance(state_dict, dict):
@@ -1029,10 +1614,10 @@ if __name__ == '__main__':
         "emotion_class_order": EMOTION_CLASSES,
         "device": str(device),
     }
+    output_path.mkdir(parents=True, exist_ok=True)
     if not args.no_log:
-        os.makedirs(args.output, exist_ok=True)
         with open(
-            os.path.join(args.output, "checkpoint_load.json"),
+            output_path / "checkpoint_load.json",
             "w",
             encoding="utf-8",
         ) as f:
@@ -1049,13 +1634,18 @@ if __name__ == '__main__':
         video_path=args.video,
         device=device,
         image_size=config['dataset']['image_size'],
-        output_dir=args.output,
+        output_dir=str(output_path),
         face_mode=args.face_mode,
         face_index=args.face_index,
         frame_stride=args.frame_stride,
         detection_max_side=args.detection_max_side,
         sample_every=args.sample_every,
-        annotate_video=not args.no_annotate,
+        annotate_video=True,
         write_diagnostics=not args.no_log,
         show_region_weights=args.show_region_weights,
+        temporal_analysis=args.temporal_analysis,
+        alpha=float(config.get('stress', {}).get('alpha', 0.7)),
+        beta=float(config.get('stress', {}).get('beta', 0.3)),
+        config_path=args.config,
+        checkpoint_report=checkpoint_report,
     )

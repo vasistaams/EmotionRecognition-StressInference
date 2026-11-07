@@ -89,9 +89,10 @@ def infer_webcam(
     temporal_tracker = TemporalSignalTracker() if temporal_analysis else None
     last_confidence = 0.0
     last_transition = "No transition yet"
+    transition_count = 0
     last_persistence = 0.0
     last_volatility = 0.0
-    last_timestamp = 0.0
+    probability_history = deque(maxlen=16)
     last_probability_lines = ["", ""]
     last_faces = []
     log_rows = []
@@ -104,6 +105,7 @@ def infer_webcam(
                 print("[InferWebcam] Could not read a webcam frame.")
                 break
 
+            session_elapsed = time.monotonic() - session_start
             if overlay:
                 cv2.putText(
                     frame_bgr,
@@ -125,17 +127,18 @@ def infer_webcam(
                 )
             if temporal_analysis and overlay:
                 overlay_lines = [
-                    f"Time: {last_timestamp:.2f}s",
                     last_probability_lines[0],
                     last_probability_lines[1],
                     f"Confidence: {last_confidence:.2f}",
                     f"Transition: {last_transition}",
+                    f"Transition count: {transition_count}",
                     f"Persistence: {last_persistence:.1f}s",
-                    f"Volatility: {last_volatility:.3f}",
+                    f"Volatility (last 16 predictions): {last_volatility:.3f}",
+                    f"Session time: {session_elapsed:.1f}s",
                 ]
                 for line_index, text in enumerate(overlay_lines):
                     cv2.putText(
-                        frame_bgr, text, (20, 112 + line_index * 24),
+                        frame_bgr, text, (20, 112 + line_index * 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.48, (245, 245, 245), 1,
                     )
             if overlay:
@@ -183,6 +186,11 @@ def infer_webcam(
                 last_stress = 0.0
                 last_confidence = 0.0
                 last_probability_lines = ["", ""]
+                last_persistence = 0.0
+                last_volatility = 0.0
+                probability_history.clear()
+                if temporal_analysis:
+                    temporal_tracker = TemporalSignalTracker()
                 frame_buffer.clear()
                 continue
 
@@ -269,9 +277,19 @@ def infer_webcam(
             output = model.forward_sequence(x_seq)
             if temporal_analysis:
                 record = temporal_tracker.update(
-                    last_probs, timestamp
+                    last_probs, time.monotonic() - session_start
                 )
-                last_timestamp = record['timestamp_seconds']
+                if record['transition'] is not None:
+                    transition_count += 1
+                probability_history.append(last_probs.copy())
+                if len(probability_history) > 1:
+                    recent_probabilities = np.stack(probability_history)
+                    volatility_steps = (
+                        0.5 * np.abs(np.diff(recent_probabilities, axis=0)).sum(axis=1)
+                    )
+                    last_volatility = float(np.mean(volatility_steps))
+                else:
+                    last_volatility = 0.0
                 probability_labels = ["A", "D", "F", "H", "Sa", "Su", "N"]
                 compact_probs = [
                     f"{label}:{probability:.2f}"
@@ -285,7 +303,6 @@ def infer_webcam(
                 last_confidence = float(last_probs.max())
                 last_transition = record['last_transition']
                 last_persistence = record['persistence_seconds']
-                last_volatility = record['probability_volatility']
             else:
                 last_stress = float(output['stress_score'][0, 0].item())
     finally:
@@ -319,9 +336,9 @@ def main() -> None:
     parser.add_argument('--camera-height', type=int, default=480)
     parser.add_argument('--arwm', action='store_true',
                         help='Legacy alias for --arwm-mode adaptive')
-    parser.add_argument('--arwm-mode', choices=('off', 'fixed', 'adaptive'))
+    parser.add_argument('--arwm-mode', choices=('off', 'fixed', 'adaptive', 'context_aware'))
     parser.add_argument('--temporal-analysis', action='store_true',
-                        help='Display temporal signals and deterministic stress proxy')
+                        help='Display live temporal metrics and deterministic stress proxy')
     parser.add_argument(
         '--face-mode', choices=('largest', 'selected', 'all'), default='largest'
     )
@@ -347,7 +364,9 @@ def main() -> None:
     config.setdefault('model', {}).setdefault('swin', {})['pretrained'] = False
     model = build_framework(config).to(device)
     checkpoint = torch.load(
-        args.checkpoint, map_location=device, weights_only=False
+        args.checkpoint,
+        map_location="cpu",
+        weights_only=True,
     )
     state_dict = checkpoint.get('model') if isinstance(checkpoint, dict) else None
     if not isinstance(state_dict, dict):

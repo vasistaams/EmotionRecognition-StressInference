@@ -7,8 +7,28 @@ import numpy as np
 from utils.stress_formulation import EMOTION_CLASSES, NEGATIVE_EMOTION_INDICES
 
 
+def compute_nadi(
+    negative_affect: float,
+    previous_negative_affect: Optional[float],
+    alpha: float = 0.7,
+    beta: float = 0.3,
+) -> float:
+    """Compute the configured negative-affect and change proxy."""
+    values = [negative_affect, alpha, beta]
+    if previous_negative_affect is not None:
+        values.append(previous_negative_affect)
+    if not np.isfinite(values).all():
+        raise ValueError("NADI inputs must be finite")
+    delta = (
+        0.0
+        if previous_negative_affect is None
+        else abs(negative_affect - previous_negative_affect)
+    )
+    return float(alpha * negative_affect + beta * delta)
+
+
 class TemporalSignalTracker:
-    """Track emotion transitions, persistence, volatility, and proxy stress."""
+    """Track emotion transitions, persistence, volatility, and NADI."""
 
     def __init__(self, alpha: float = 0.7, beta: float = 0.3):
         self.alpha = alpha
@@ -55,9 +75,11 @@ class TemporalSignalTracker:
                 negative_affect - self.previous_negative_affect
             )
 
-        stress_proxy = (
-            self.alpha * negative_affect
-            + self.beta * negative_volatility
+        nadi = compute_nadi(
+            negative_affect,
+            self.previous_negative_affect,
+            alpha=self.alpha,
+            beta=self.beta,
         )
         persistence = max(0.0, timestamp - self.run_start_seconds)
 
@@ -74,7 +96,8 @@ class TemporalSignalTracker:
             "probability_volatility": volatility,
             "negative_affect": negative_affect,
             "negative_affect_volatility": float(negative_volatility),
-            "stress_proxy": float(stress_proxy),
+            "nadi": nadi,
+            "stress_proxy": nadi,
         }
 
         self.previous_probs = probs.copy()
